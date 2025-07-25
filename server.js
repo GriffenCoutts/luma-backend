@@ -12,6 +12,7 @@ let userData = {
   profile: {
     name: "",
     age: "",
+    birthDate: null,
     joinDate: new Date().toISOString(),
     profileColorHex: "800080", // Purple
     notifications: true,
@@ -84,11 +85,12 @@ app.get('/api/profile', (req, res) => {
 
 app.post('/api/profile', (req, res) => {
   try {
-    const { name, age, joinDate, profileColorHex, notifications, biometricAuth, darkMode, reminderTime } = req.body;
+    const { name, age, birthDate, joinDate, profileColorHex, notifications, biometricAuth, darkMode, reminderTime } = req.body;
     
     userData.profile = {
       name: name || userData.profile.name,
       age: age || userData.profile.age,
+      birthDate: birthDate || userData.profile.birthDate,
       joinDate: joinDate || userData.profile.joinDate,
       profileColorHex: profileColorHex || userData.profile.profileColorHex,
       notifications: notifications !== undefined ? notifications : userData.profile.notifications,
@@ -187,6 +189,7 @@ app.post('/api/reset', (req, res) => {
       profile: {
         name: "",
         age: "",
+        birthDate: null,
         joinDate: new Date().toISOString(),
         profileColorHex: "800080",
         notifications: true,
