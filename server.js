@@ -121,6 +121,6 @@ Remember: You're their brilliant, intuitive friend who just happens to understan
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
   console.log(`✅ Luma backend running on port ${PORT}`);
 });
