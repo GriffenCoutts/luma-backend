@@ -48,7 +48,7 @@ app.post('/api/chat', async (req, res) => {
           }
         ],
         temperature: 0.9,
-        max_tokens: 200
+        max_tokens: 500
       }),
     });
     const data = await response.json();
