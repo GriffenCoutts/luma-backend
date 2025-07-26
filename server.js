@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
@@ -10,12 +11,16 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// JWT Secret (add this to your environment variables)
+// Initialize Resend
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this';
 
 // In-memory storage (replace with database in production)
 let users = []; // { id, username, email, password, createdAt }
 let userData = {}; // { userId: { profile: {}, moodEntries: [], journalEntries: [] } }
+let passwordResetTokens = {}; // { token: { userId, expires } }
 
 // AUTHENTICATION MIDDLEWARE
 const authenticateToken = (req, res, next) => {
@@ -47,6 +52,12 @@ app.post('/api/auth/register', async (req, res) => {
 
     if (password.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
     }
 
     // Check if user already exists
@@ -154,6 +165,125 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Server error during login' });
+  }
+});
+
+// FORGOT PASSWORD - Request Reset
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    // Find user by email
+    const user = users.find(u => u.email === email);
+    if (!user) {
+      // Don't reveal if email exists or not for security
+      return res.json({ 
+        success: true, 
+        message: 'If an account with that email exists, we have sent a password reset link.' 
+      });
+    }
+
+    // Generate reset token
+    const resetToken = generateUUID();
+    const expires = new Date(Date.now() + 3600000); // 1 hour from now
+
+    // Store reset token
+    passwordResetTokens[resetToken] = {
+      userId: user.id,
+      expires: expires
+    };
+
+    // Send email
+    try {
+      await resend.emails.send({
+        from: 'Luma <noreply@yourdomain.com>', // Replace with your domain
+        to: [email],
+        subject: 'Reset Your Luma Password',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #7C3AED;">Reset Your Luma Password</h2>
+            <p>Hi ${user.username},</p>
+            <p>We received a request to reset your password. Click the link below to create a new password:</p>
+            <a href="luma://reset-password?token=${resetToken}" 
+               style="background-color: #7C3AED; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; margin: 20px 0;">
+              Reset Password
+            </a>
+            <p>This link will expire in 1 hour.</p>
+            <p>If you didn't request this, you can safely ignore this email.</p>
+            <p>Best regards,<br>The Luma Team</p>
+          </div>
+        `
+      });
+
+      res.json({ 
+        success: true, 
+        message: 'Password reset email sent successfully.' 
+      });
+
+    } catch (emailError) {
+      console.error('Email sending error:', emailError);
+      res.status(500).json({ error: 'Failed to send reset email' });
+    }
+
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// RESET PASSWORD - Confirm Reset
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'Token and new password are required' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    // Check if token exists and is valid
+    const resetData = passwordResetTokens[token];
+    if (!resetData) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    // Check if token is expired
+    if (new Date() > resetData.expires) {
+      delete passwordResetTokens[token];
+      return res.status(400).json({ error: 'Reset token has expired' });
+    }
+
+    // Find user
+    const user = users.find(u => u.id === resetData.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Hash new password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    // Update user password
+    user.password = hashedPassword;
+
+    // Remove used token
+    delete passwordResetTokens[token];
+
+    res.json({
+      success: true,
+      message: 'Password reset successfully'
+    });
+
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -423,11 +553,23 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Cleanup expired tokens every hour
+setInterval(() => {
+  const now = new Date();
+  Object.keys(passwordResetTokens).forEach(token => {
+    if (now > passwordResetTokens[token].expires) {
+      delete passwordResetTokens[token];
+    }
+  });
+}, 3600000); // 1 hour
+
 app.listen(PORT, () => {
   console.log(`✅ Luma backend running on port ${PORT}`);
   console.log(`Available endpoints:`);
   console.log(`- POST /api/auth/register`);
   console.log(`- POST /api/auth/login`);
+  console.log(`- POST /api/auth/forgot-password`);
+  console.log(`- POST /api/auth/reset-password`);
   console.log(`- GET /api/auth/me`);
   console.log(`- POST /api/auth/logout`);
   console.log(`- POST /api/chat (authenticated)`);
