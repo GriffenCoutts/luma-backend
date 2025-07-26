@@ -1,4 +1,4 @@
-const express = require('express');
+$const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -201,7 +201,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
    // Send email
 try {
   await resend.emails.send({
-    from: from: 'Luma <onboarding@resend.dev>', // ← This line needs to change
+   from: 'Luma <onboarding@resend.dev>',
     to: [email],
     subject: 'Reset Your Luma Password',
         html: `
