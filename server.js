@@ -201,7 +201,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
    // Send email
 try {
   await resend.emails.send({
-    from: 'Luma <noreply@yourdomain.com>', // ← This line needs to change
+    from: from: 'Luma <onboarding@resend.dev>', // ← This line needs to change
     to: [email],
     subject: 'Reset Your Luma Password',
         html: `
