@@ -1,31 +1,189 @@
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
+// JWT Secret (add this to your environment variables)
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this';
+
 // In-memory storage (replace with database in production)
-let userData = {
-  profile: {
-    name: "",
-    age: "",
-    birthDate: null,
-    joinDate: new Date().toISOString(),
-    profileColorHex: "800080", // Purple
-    notifications: true,
-    biometricAuth: false,
-    darkMode: false,
-    reminderTime: new Date().toISOString()
-  },
-  moodEntries: [],
-  journalEntries: []
+let users = []; // { id, username, email, password, createdAt }
+let userData = {}; // { userId: { profile: {}, moodEntries: [], journalEntries: [] } }
+
+// AUTHENTICATION MIDDLEWARE
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
 };
 
-// EXISTING CHAT ENDPOINT (keeping your OpenAI integration)
-app.post('/api/chat', async (req, res) => {
+// USER REGISTRATION
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+
+    // Basic validation
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'Username, email, and password are required' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    // Check if user already exists
+    const existingUser = users.find(u => u.username === username || u.email === email);
+    if (existingUser) {
+      return res.status(400).json({ error: 'Username or email already exists' });
+    }
+
+    // Hash password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Create user
+    const userId = generateUUID();
+    const newUser = {
+      id: userId,
+      username,
+      email,
+      password: hashedPassword,
+      createdAt: new Date().toISOString()
+    };
+
+    users.push(newUser);
+
+    // Initialize user data
+    userData[userId] = {
+      profile: {
+        name: username,
+        age: "",
+        birthDate: null,
+        joinDate: new Date().toISOString(),
+        profileColorHex: "800080",
+        notifications: true,
+        biometricAuth: false,
+        darkMode: false,
+        reminderTime: new Date().toISOString()
+      },
+      moodEntries: [],
+      journalEntries: []
+    };
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: userId, username: username },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      message: 'User registered successfully',
+      token,
+      user: {
+        id: userId,
+        username,
+        email
+      }
+    });
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Server error during registration' });
+  }
+});
+
+// USER LOGIN
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+
+    // Find user (allow login with username or email)
+    const user = users.find(u => u.username === username || u.email === username);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Check password
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    if (!isValidPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: user.id, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email
+      }
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Server error during login' });
+  }
+});
+
+// GET CURRENT USER
+app.get('/api/auth/me', authenticateToken, (req, res) => {
+  try {
+    const user = users.find(u => u.id === req.user.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      createdAt: user.createdAt
+    });
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// LOGOUT (Optional - mainly for clearing client-side token)
+app.post('/api/auth/logout', authenticateToken, (req, res) => {
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+// UPDATED CHAT ENDPOINT (with authentication)
+app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
     const { message } = req.body;
     
@@ -40,7 +198,26 @@ app.post('/api/chat', async (req, res) => {
         messages: [
           {
             role: 'system',
-            content: `You are Luma, a brilliant and deeply empathetic friend who happens to have exceptional insight into human psychology. Talk like a real person, not a therapist bot. Be warm, genuine, and incredibly wise.`
+            content: `You are Luma, a compassionate AI therapist and wellness companion focused on mental health and emotional wellbeing. You provide thoughtful, empathetic responses that help users process their emotions and develop healthy coping strategies.
+
+Your expertise includes:
+- Evidence-based therapy techniques (CBT, DBT, mindfulness)
+- Mental health support and emotional processing
+- Stress management and anxiety reduction techniques
+- Healthy coping strategies and self-care practices
+- Building emotional resilience and self-awareness
+- Practical advice for daily mental wellness
+- Recognizing when professional help may be needed
+
+Your approach:
+- Provide warm, non-judgmental support
+- Use evidence-based therapeutic techniques
+- Offer practical, actionable advice
+- Help users identify patterns in their thoughts and emotions
+- Encourage healthy habits and self-reflection
+- Always emphasize that you're a supportive tool, not a replacement for professional therapy when serious issues arise
+
+Be warm, genuine, and focus on evidence-based mental health practices. Keep responses helpful, engaging, and grounded in psychological wellness principles.`
           },
           {
             role: 'user',
@@ -48,7 +225,7 @@ app.post('/api/chat', async (req, res) => {
           }
         ],
         temperature: 0.9,
-        max_tokens: 200
+        max_tokens: 500
       }),
     });
     const data = await response.json();
@@ -73,43 +250,54 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// NEW PROFILE ENDPOINTS
-app.get('/api/profile', (req, res) => {
+// UPDATED PROFILE ENDPOINTS (with authentication)
+app.get('/api/profile', authenticateToken, (req, res) => {
   try {
-    res.json(userData.profile);
+    const userProfile = userData[req.user.userId]?.profile;
+    if (!userProfile) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+    res.json(userProfile);
   } catch (error) {
     console.error('Profile load error:', error);
     res.status(500).json({ error: 'Failed to load profile' });
   }
 });
 
-app.post('/api/profile', (req, res) => {
+app.post('/api/profile', authenticateToken, (req, res) => {
   try {
     const { name, age, birthDate, joinDate, profileColorHex, notifications, biometricAuth, darkMode, reminderTime } = req.body;
     
-    userData.profile = {
-      name: name || userData.profile.name,
-      age: age || userData.profile.age,
-      birthDate: birthDate || userData.profile.birthDate,
-      joinDate: joinDate || userData.profile.joinDate,
-      profileColorHex: profileColorHex || userData.profile.profileColorHex,
-      notifications: notifications !== undefined ? notifications : userData.profile.notifications,
-      biometricAuth: biometricAuth !== undefined ? biometricAuth : userData.profile.biometricAuth,
-      darkMode: darkMode !== undefined ? darkMode : userData.profile.darkMode,
-      reminderTime: reminderTime || userData.profile.reminderTime
+    if (!userData[req.user.userId]) {
+      userData[req.user.userId] = { profile: {}, moodEntries: [], journalEntries: [] };
+    }
+
+    const currentProfile = userData[req.user.userId].profile;
+    
+    userData[req.user.userId].profile = {
+      name: name || currentProfile.name,
+      age: age || currentProfile.age,
+      birthDate: birthDate || currentProfile.birthDate,
+      joinDate: joinDate || currentProfile.joinDate,
+      profileColorHex: profileColorHex || currentProfile.profileColorHex,
+      notifications: notifications !== undefined ? notifications : currentProfile.notifications,
+      biometricAuth: biometricAuth !== undefined ? biometricAuth : currentProfile.biometricAuth,
+      darkMode: darkMode !== undefined ? darkMode : currentProfile.darkMode,
+      reminderTime: reminderTime || currentProfile.reminderTime
     };
     
-    res.json({ success: true, profile: userData.profile });
+    res.json({ success: true, profile: userData[req.user.userId].profile });
   } catch (error) {
     console.error('Profile save error:', error);
     res.status(500).json({ error: 'Failed to save profile' });
   }
 });
 
-// NEW MOOD ENDPOINTS
-app.get('/api/mood', (req, res) => {
+// UPDATED MOOD ENDPOINTS (with authentication)
+app.get('/api/mood', authenticateToken, (req, res) => {
   try {
-    const sortedEntries = userData.moodEntries.sort((a, b) => new Date(b.date) - new Date(a.date));
+    const userMoodEntries = userData[req.user.userId]?.moodEntries || [];
+    const sortedEntries = userMoodEntries.sort((a, b) => new Date(b.date) - new Date(a.date));
     res.json(sortedEntries);
   } catch (error) {
     console.error('Mood load error:', error);
@@ -117,7 +305,7 @@ app.get('/api/mood', (req, res) => {
   }
 });
 
-app.post('/api/mood', (req, res) => {
+app.post('/api/mood', authenticateToken, (req, res) => {
   try {
     const { id, mood, note, date } = req.body;
     
@@ -128,6 +316,10 @@ app.post('/api/mood', (req, res) => {
     if (mood < 1 || mood > 10) {
       return res.status(400).json({ error: 'Mood must be between 1 and 10' });
     }
+
+    if (!userData[req.user.userId]) {
+      userData[req.user.userId] = { profile: {}, moodEntries: [], journalEntries: [] };
+    }
     
     const moodEntry = {
       id: id || generateUUID(),
@@ -136,7 +328,7 @@ app.post('/api/mood', (req, res) => {
       date: date
     };
     
-    userData.moodEntries.push(moodEntry);
+    userData[req.user.userId].moodEntries.push(moodEntry);
     res.json({ success: true, entry: moodEntry });
   } catch (error) {
     console.error('Mood save error:', error);
@@ -144,10 +336,11 @@ app.post('/api/mood', (req, res) => {
   }
 });
 
-// NEW JOURNAL ENDPOINTS
-app.get('/api/journal', (req, res) => {
+// UPDATED JOURNAL ENDPOINTS (with authentication)
+app.get('/api/journal', authenticateToken, (req, res) => {
   try {
-    const sortedEntries = userData.journalEntries.sort((a, b) => new Date(b.date) - new Date(a.date));
+    const userJournalEntries = userData[req.user.userId]?.journalEntries || [];
+    const sortedEntries = userJournalEntries.sort((a, b) => new Date(b.date) - new Date(a.date));
     res.json(sortedEntries);
   } catch (error) {
     console.error('Journal load error:', error);
@@ -155,7 +348,7 @@ app.get('/api/journal', (req, res) => {
   }
 });
 
-app.post('/api/journal', (req, res) => {
+app.post('/api/journal', authenticateToken, (req, res) => {
   try {
     const { id, content, prompt, date } = req.body;
     
@@ -166,6 +359,10 @@ app.post('/api/journal', (req, res) => {
     if (content.trim().length === 0) {
       return res.status(400).json({ error: 'Content cannot be empty' });
     }
+
+    if (!userData[req.user.userId]) {
+      userData[req.user.userId] = { profile: {}, moodEntries: [], journalEntries: [] };
+    }
     
     const journalEntry = {
       id: id || generateUUID(),
@@ -174,7 +371,7 @@ app.post('/api/journal', (req, res) => {
       date: date
     };
     
-    userData.journalEntries.push(journalEntry);
+    userData[req.user.userId].journalEntries.push(journalEntry);
     res.json({ success: true, entry: journalEntry });
   } catch (error) {
     console.error('Journal save error:', error);
@@ -182,12 +379,12 @@ app.post('/api/journal', (req, res) => {
   }
 });
 
-// NEW RESET ENDPOINT
-app.post('/api/reset', (req, res) => {
+// RESET USER DATA (authenticated user only)
+app.post('/api/reset', authenticateToken, (req, res) => {
   try {
-    userData = {
+    userData[req.user.userId] = {
       profile: {
-        name: "",
+        name: req.user.username,
         age: "",
         birthDate: null,
         joinDate: new Date().toISOString(),
@@ -201,7 +398,7 @@ app.post('/api/reset', (req, res) => {
       journalEntries: []
     };
     
-    res.json({ success: true, message: 'All data has been reset' });
+    res.json({ success: true, message: 'Your data has been reset' });
   } catch (error) {
     console.error('Reset error:', error);
     res.status(500).json({ error: 'Failed to reset data' });
@@ -222,16 +419,20 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    endpoints: ['/api/chat', '/api/profile', '/api/mood', '/api/journal', '/api/reset']
+    endpoints: ['/api/auth/*', '/api/chat', '/api/profile', '/api/mood', '/api/journal', '/api/reset']
   });
 });
 
 app.listen(PORT, () => {
   console.log(`✅ Luma backend running on port ${PORT}`);
   console.log(`Available endpoints:`);
-  console.log(`- POST /api/chat`);
-  console.log(`- GET/POST /api/profile`);
-  console.log(`- GET/POST /api/mood`);
-  console.log(`- GET/POST /api/journal`);
-  console.log(`- POST /api/reset`);
+  console.log(`- POST /api/auth/register`);
+  console.log(`- POST /api/auth/login`);
+  console.log(`- GET /api/auth/me`);
+  console.log(`- POST /api/auth/logout`);
+  console.log(`- POST /api/chat (authenticated)`);
+  console.log(`- GET/POST /api/profile (authenticated)`);
+  console.log(`- GET/POST /api/mood (authenticated)`);
+  console.log(`- GET/POST /api/journal (authenticated)`);
+  console.log(`- POST /api/reset (authenticated)`);
 });
