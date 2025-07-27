@@ -312,23 +312,16 @@ app.post('/api/auth/logout', authenticateToken, (req, res) => {
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
-// UPDATED CHAT ENDPOINT (with authentication)
+// UPDATED CHAT ENDPOINT (with authentication and conversation memory)
 app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, chatHistory } = req.body;
     
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4',
-        messages: [
-          {
-            role: 'system',
-            content: `You are Luma, a supportive AI mental health companion who provides IMMEDIATE, PRACTICAL help. Your job is to give specific strategies and support right away, not just ask questions.
+    // Build the conversation history for OpenAI
+    const messages = [
+      {
+        role: 'system',
+        content: `You are Luma, a supportive AI mental health companion who provides IMMEDIATE, PRACTICAL help. Your job is to give specific strategies and support right away, not just ask questions.
 
 CRITICAL: Always provide concrete strategies in your first response. Don't just validate and ask for more details.
 
@@ -348,12 +341,35 @@ For sleep issues: "Sleep problems are exhausting and make everything harder. Her
 NEVER respond with just questions or "tell me more." Always give practical strategies first.
 
 Your tone should be: caring but action-oriented, like a knowledgeable friend who actually helps solve problems, not a therapist who just reflects feelings back.`
-          },
-          {
-            role: 'user',
-            content: message
-          }
-        ],
+      }
+    ];
+    
+    // Add conversation history if provided
+    if (chatHistory && Array.isArray(chatHistory)) {
+      // Convert chat history to OpenAI format
+      chatHistory.forEach(msg => {
+        messages.push({
+          role: msg.isUser ? 'user' : 'assistant',
+          content: msg.text
+        });
+      });
+    }
+    
+    // Add the current message
+    messages.push({
+      role: 'user',
+      content: message
+    });
+    
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: messages,
         temperature: 0.9,
         max_tokens: 500
       }),
