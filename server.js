@@ -321,6 +321,25 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
     const { message, chatHistory } = req.body;
     
+    // Get user's questionnaire responses for context
+    const userQuestionnaire = userData[req.user.userId]?.questionnaire;
+    let questionnaireContext = '';
+    
+    if (userQuestionnaire && userQuestionnaire.completed && userQuestionnaire.responses) {
+      const responses = userQuestionnaire.responses;
+      questionnaireContext = `\n\nIMPORTANT USER CONTEXT (reference this naturally in conversation):
+- What brings them to Luma: ${responses.mainGoal || 'Not specified'}
+- Current challenges: ${responses.challenges || 'Not specified'}
+- Age range: ${responses.ageRange || 'Not specified'}
+- Occupation: ${responses.occupation || 'Not specified'}
+- Support system: ${responses.supportSystem || 'Not specified'}
+- Previous therapy/counseling: ${responses.previousTherapy || 'Not specified'}
+- Preferred coping strategies: ${responses.copingStrategies || 'Not specified'}
+- Communication preference: ${responses.communicationStyle || 'Not specified'}
+
+Use this information to personalize your responses and reference relevant details when appropriate.`;
+    }
+    
     // Build the conversation history for OpenAI
     const messages = [
       {
@@ -344,7 +363,7 @@ For sleep issues: "Sleep problems are exhausting and make everything harder. Her
 
 NEVER respond with just questions or "tell me more." Always give practical strategies first.
 
-Your tone should be: caring but action-oriented, like a knowledgeable friend who actually helps solve problems, not a therapist who just reflects feelings back.`
+Your tone should be: caring but action-oriented, like a knowledgeable friend who actually helps solve problems, not a therapist who just reflects feelings back.${questionnaireContext}`
       }
     ];
     
@@ -608,7 +627,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    endpoints: ['/api/auth/*', '/api/chat', '/api/profile', '/api/mood', '/api/journal', '/api/reset']
+    endpoints: ['/api/auth/*', '/api/questionnaire', '/api/chat', '/api/profile', '/api/mood', '/api/journal', '/api/reset']
   });
 });
 
