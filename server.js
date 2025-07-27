@@ -97,7 +97,16 @@ app.post('/api/auth/register', async (req, res) => {
       },
       questionnaire: {
         completed: false,
-        responses: {}
+        responses: {
+          mainGoal: "",
+          challenges: [],
+          ageRange: "",
+          occupation: "",
+          supportSystem: "",
+          previousTherapy: "",
+          copingStrategies: [],
+          communicationStyle: ""
+        }
       },
       moodEntries: [],
       journalEntries: []
