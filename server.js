@@ -95,6 +95,10 @@ app.post('/api/auth/register', async (req, res) => {
         darkMode: false,
         reminderTime: new Date().toISOString()
       },
+      questionnaire: {
+        completed: false,
+        responses: {}
+      },
       moodEntries: [],
       journalEntries: []
     };
@@ -393,6 +397,45 @@ Your tone should be: caring but action-oriented, like a knowledgeable friend who
       error: 'Server error',
       success: false 
     });
+  }
+});
+
+// QUESTIONNAIRE ENDPOINTS
+app.get('/api/questionnaire', authenticateToken, (req, res) => {
+  try {
+    const userQuestionnaire = userData[req.user.userId]?.questionnaire;
+    if (!userQuestionnaire) {
+      return res.json({ completed: false, responses: {} });
+    }
+    res.json(userQuestionnaire);
+  } catch (error) {
+    console.error('Questionnaire load error:', error);
+    res.status(500).json({ error: 'Failed to load questionnaire' });
+  }
+});
+
+app.post('/api/questionnaire', authenticateToken, (req, res) => {
+  try {
+    const { responses } = req.body;
+    
+    if (!responses || typeof responses !== 'object') {
+      return res.status(400).json({ error: 'Invalid questionnaire responses' });
+    }
+
+    if (!userData[req.user.userId]) {
+      userData[req.user.userId] = { profile: {}, questionnaire: {}, moodEntries: [], journalEntries: [] };
+    }
+    
+    userData[req.user.userId].questionnaire = {
+      completed: true,
+      responses: responses,
+      completedAt: new Date().toISOString()
+    };
+    
+    res.json({ success: true, questionnaire: userData[req.user.userId].questionnaire });
+  } catch (error) {
+    console.error('Questionnaire save error:', error);
+    res.status(500).json({ error: 'Failed to save questionnaire' });
   }
 });
 
