@@ -82,13 +82,13 @@ app.post('/api/auth/register', async (req, res) => {
 
     users.push(newUser);
 
-    // Initialize user data with NEW FIELDS
+    // Initialize user data with UPDATED QUESTIONNAIRE FIELDS
     userData[userId] = {
       profile: {
         name: username,
-        firstName: "",        // NEW
-        lastName: "",         // NEW
-        pronouns: "",         // NEW
+        firstName: "",
+        lastName: "",
+        pronouns: "",
         age: "",
         birthDate: null,
         joinDate: new Date().toISOString(),
@@ -101,13 +101,13 @@ app.post('/api/auth/register', async (req, res) => {
       questionnaire: {
         completed: false,
         responses: {
-          firstName: "",              // NEW
-          lastName: "",               // NEW
-          birthDate: null,            // NEW
-          pronouns: "",               // NEW
-          mainGoal: "",
+          firstName: "",
+          lastName: "",
+          birthDate: null,
+          pronouns: "",
+          mainGoals: [],              // UPDATED: Changed from mainGoal to mainGoals array
           challenges: [],
-          ageRange: "",
+          // REMOVED: ageRange field (no longer needed since we get age from birthDate)
           occupation: "",
           supportSystem: "",
           previousTherapy: "",
@@ -188,7 +188,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// FORGOT PASSWORD - Request Reset (FULLY FIXED)
+// FORGOT PASSWORD - Request Reset
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -387,12 +387,12 @@ app.get('/api/auth/me', authenticateToken, (req, res) => {
   }
 });
 
-// LOGOUT (Optional - mainly for clearing client-side token)
+// LOGOUT
 app.post('/api/auth/logout', authenticateToken, (req, res) => {
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
-// IMPROVED CHAT ENDPOINT (with better conversational AI and name/pronouns context)
+// UPDATED CHAT ENDPOINT (with better conversational AI and context from questionnaire)
 app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
     const { message, chatHistory } = req.body;
@@ -406,7 +406,7 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
       const responses = userQuestionnaire.responses;
       questionnaireContext = `\n\nIMPORTANT USER CONTEXT (reference naturally when relevant):`;
       
-      // NEW: Add personal information
+      // Add personal information
       if (responses.firstName) {
         questionnaireContext += `\n- Name: ${responses.firstName} ${responses.lastName || ''} (call them ${responses.firstName})`;
       }
@@ -418,9 +418,13 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
         questionnaireContext += `\n- Age: ${age} years old`;
       }
       
-      questionnaireContext += `\n- What brings them to Luma: ${responses.mainGoal || 'Not specified'}
+      // UPDATED: Handle mainGoals as array
+      const goalsText = Array.isArray(responses.mainGoals) && responses.mainGoals.length > 0 
+        ? responses.mainGoals.join(', ') 
+        : 'Not specified';
+      
+      questionnaireContext += `\n- What brings them to Luma: ${goalsText}
 - Current challenges: ${responses.challenges ? responses.challenges.join(', ') : 'Not specified'}
-- Age range: ${responses.ageRange || 'Not specified'}
 - Occupation: ${responses.occupation || 'Not specified'}
 - Support system: ${responses.supportSystem || 'Not specified'}
 - Previous therapy/counseling: ${responses.previousTherapy || 'Not specified'}
@@ -476,7 +480,6 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
     
     // Add conversation history if provided
     if (chatHistory && Array.isArray(chatHistory)) {
-      // Convert chat history to OpenAI format
       chatHistory.forEach(msg => {
         messages.push({
           role: msg.isUser ? 'user' : 'assistant',
@@ -526,13 +529,35 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
   }
 });
 
-// QUESTIONNAIRE ENDPOINTS
+// UPDATED QUESTIONNAIRE ENDPOINTS
 app.get('/api/questionnaire', authenticateToken, (req, res) => {
   try {
     const userQuestionnaire = userData[req.user.userId]?.questionnaire;
     if (!userQuestionnaire) {
-      return res.json({ completed: false, responses: {} });
+      return res.json({ 
+        completed: false, 
+        responses: {
+          firstName: "",
+          lastName: "",
+          birthDate: null,
+          pronouns: "",
+          mainGoals: [],              // UPDATED: Array instead of string
+          challenges: [],
+          occupation: "",
+          supportSystem: "",
+          previousTherapy: "",
+          copingStrategies: [],
+          communicationStyle: ""
+        } 
+      });
     }
+    
+    // Ensure backward compatibility - convert old mainGoal to mainGoals
+    if (userQuestionnaire.responses && userQuestionnaire.responses.mainGoal && !userQuestionnaire.responses.mainGoals) {
+      userQuestionnaire.responses.mainGoals = [userQuestionnaire.responses.mainGoal];
+      delete userQuestionnaire.responses.mainGoal;
+    }
+    
     res.json(userQuestionnaire);
   } catch (error) {
     console.error('Questionnaire load error:', error);
@@ -546,6 +571,26 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
     
     if (!responses || typeof responses !== 'object') {
       return res.status(400).json({ error: 'Invalid questionnaire responses' });
+    }
+
+    // UPDATED VALIDATION for new questionnaire structure
+    const requiredFields = ['firstName', 'pronouns', 'mainGoals', 'challenges', 'occupation', 'supportSystem', 'copingStrategies', 'previousTherapy', 'communicationStyle'];
+    const missingFields = requiredFields.filter(field => {
+      if (Array.isArray(responses[field])) {
+        return responses[field].length === 0;
+      }
+      return !responses[field] || responses[field].trim() === '';
+    });
+    
+    if (missingFields.length > 0) {
+      return res.status(400).json({ 
+        error: `Missing required fields: ${missingFields.join(', ')}` 
+      });
+    }
+
+    // Validate mainGoals is an array
+    if (!Array.isArray(responses.mainGoals)) {
+      return res.status(400).json({ error: 'mainGoals must be an array' });
     }
 
     if (!userData[req.user.userId]) {
@@ -570,11 +615,30 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
       };
     }
     
+    // Clean the responses - remove any old fields and ensure new structure
+    const cleanedResponses = {
+      firstName: responses.firstName || "",
+      lastName: responses.lastName || "",
+      birthDate: responses.birthDate || null,
+      pronouns: responses.pronouns || "",
+      mainGoals: Array.isArray(responses.mainGoals) ? responses.mainGoals : [],  // UPDATED
+      challenges: Array.isArray(responses.challenges) ? responses.challenges : [],
+      // REMOVED: ageRange field
+      occupation: responses.occupation || "",
+      supportSystem: responses.supportSystem || "",
+      previousTherapy: responses.previousTherapy || "",
+      copingStrategies: Array.isArray(responses.copingStrategies) ? responses.copingStrategies : [],
+      communicationStyle: responses.communicationStyle || ""
+    };
+    
     userData[req.user.userId].questionnaire = {
       completed: true,
-      responses: responses,
+      responses: cleanedResponses,
       completedAt: new Date().toISOString()
     };
+    
+    console.log('✅ Questionnaire completed for user:', req.user.username);
+    console.log('   Main goals selected:', cleanedResponses.mainGoals);
     
     res.json({ success: true, questionnaire: userData[req.user.userId].questionnaire });
   } catch (error) {
@@ -583,7 +647,7 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
   }
 });
 
-// UPDATED PROFILE ENDPOINTS (with authentication and new fields)
+// PROFILE ENDPOINTS
 app.get('/api/profile', authenticateToken, (req, res) => {
   try {
     const userProfile = userData[req.user.userId]?.profile;
@@ -601,9 +665,9 @@ app.post('/api/profile', authenticateToken, (req, res) => {
   try {
     const { 
       name, 
-      firstName,        // NEW
-      lastName,         // NEW
-      pronouns,         // NEW
+      firstName,
+      lastName,
+      pronouns,
       age, 
       birthDate, 
       joinDate, 
@@ -630,9 +694,9 @@ app.post('/api/profile', authenticateToken, (req, res) => {
     
     userData[req.user.userId].profile = {
       name: name || currentProfile.name,
-      firstName: firstName || currentProfile.firstName || "",           // NEW
-      lastName: lastName || currentProfile.lastName || "",              // NEW
-      pronouns: pronouns || currentProfile.pronouns || "",              // NEW
+      firstName: firstName || currentProfile.firstName || "",
+      lastName: lastName || currentProfile.lastName || "",
+      pronouns: pronouns || currentProfile.pronouns || "",
       age: age || currentProfile.age,
       birthDate: birthDate || currentProfile.birthDate,
       joinDate: joinDate || currentProfile.joinDate,
@@ -644,7 +708,6 @@ app.post('/api/profile', authenticateToken, (req, res) => {
     };
     
     console.log('✅ Profile updated for user:', req.user.username);
-    console.log('   New profile data:', userData[req.user.userId].profile);
     
     res.json({ success: true, profile: userData[req.user.userId].profile });
   } catch (error) {
@@ -653,7 +716,7 @@ app.post('/api/profile', authenticateToken, (req, res) => {
   }
 });
 
-// UPDATED MOOD ENDPOINTS (with authentication)
+// MOOD ENDPOINTS
 app.get('/api/mood', authenticateToken, (req, res) => {
   try {
     const userMoodEntries = userData[req.user.userId]?.moodEntries || [];
@@ -696,7 +759,7 @@ app.post('/api/mood', authenticateToken, (req, res) => {
   }
 });
 
-// UPDATED JOURNAL ENDPOINTS (with authentication)
+// JOURNAL ENDPOINTS
 app.get('/api/journal', authenticateToken, (req, res) => {
   try {
     const userJournalEntries = userData[req.user.userId]?.journalEntries || [];
@@ -739,7 +802,7 @@ app.post('/api/journal', authenticateToken, (req, res) => {
   }
 });
 
-// RESET USER DATA (authenticated user only)
+// RESET USER DATA
 app.post('/api/reset', authenticateToken, (req, res) => {
   try {
     userData[req.user.userId] = {
@@ -759,7 +822,19 @@ app.post('/api/reset', authenticateToken, (req, res) => {
       },
       questionnaire: {
         completed: false,
-        responses: {}
+        responses: {
+          firstName: "",
+          lastName: "",
+          birthDate: null,
+          pronouns: "",
+          mainGoals: [],              // UPDATED: Array
+          challenges: [],
+          occupation: "",
+          supportSystem: "",
+          previousTherapy: "",
+          copingStrategies: [],
+          communicationStyle: ""
+        }
       },
       moodEntries: [],
       journalEntries: []
@@ -786,7 +861,14 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    endpoints: ['/api/auth/*', '/api/questionnaire', '/api/chat', '/api/profile', '/api/mood', '/api/journal', '/api/reset']
+    version: '2.0.0 - Updated Questionnaire',
+    endpoints: ['/api/auth/*', '/api/questionnaire', '/api/chat', '/api/profile', '/api/mood', '/api/journal', '/api/reset'],
+    updates: [
+      'mainGoals is now an array (multiple selection)',
+      'Removed ageRange field (calculated from birthDate)',
+      'Updated questionnaire validation',
+      'Backward compatibility for existing data'
+    ]
   });
 });
 
@@ -806,7 +888,11 @@ app.listen(PORT, () => {
   console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
   console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing RESEND_API_KEY'}`);
   console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
-  console.log(`Available endpoints:`);
+  console.log(`\n📋 QUESTIONNAIRE UPDATES:`);
+  console.log(`   ✅ mainGoals is now an array (multiple selection)`);
+  console.log(`   ✅ Removed ageRange field (calculated from birthDate)`);
+  console.log(`   ✅ Updated validation and backward compatibility`);
+  console.log(`\nAvailable endpoints:`);
   console.log(`- POST /api/auth/register`);
   console.log(`- POST /api/auth/login`);
   console.log(`- POST /api/auth/forgot-password`);
@@ -814,6 +900,7 @@ app.listen(PORT, () => {
   console.log(`- GET /api/auth/me`);
   console.log(`- POST /api/auth/logout`);
   console.log(`- POST /api/chat (authenticated)`);
+  console.log(`- GET/POST /api/questionnaire (authenticated) - UPDATED`);
   console.log(`- GET/POST /api/profile (authenticated)`);
   console.log(`- GET/POST /api/mood (authenticated)`);
   console.log(`- GET/POST /api/journal (authenticated)`);
