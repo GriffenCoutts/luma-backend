@@ -181,7 +181,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// FORGOT PASSWORD - Request Reset
+// FORGOT PASSWORD - Request Reset (FIXED EMAIL)
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -196,12 +196,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       // Don't reveal if email exists or not for security
       return res.json({ 
         success: true, 
-        message: 'If an account with that email exists, we have sent a password reset link.' 
+        message: 'If an account with that email exists, we have sent a password reset code.' 
       });
     }
 
-    // Generate reset token
-    const resetToken = generateUUID();
+    // Generate reset token (shorter, more user-friendly)
+    const resetToken = Math.random().toString(36).substring(2, 8).toUpperCase();
     const expires = new Date(Date.now() + 3600000); // 1 hour from now
 
     // Store reset token
@@ -210,36 +210,58 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       expires: expires
     };
 
-    // Send email
+    // Send email with improved template
     try {
       await resend.emails.send({
-        from: 'Luma <noreply@yourdomain.com>', // Replace with your domain
+        from: 'Luma <noreply@resend.dev>', // Use resend.dev for testing
         to: [email],
         subject: 'Reset Your Luma Password',
         html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #7C3AED;">Reset Your Luma Password</h2>
-            <p>Hi ${user.username},</p>
-            <p>We received a request to reset your password. Click the link below to create a new password:</p>
-            <a href="luma://reset-password?token=${resetToken}" 
-               style="background-color: #7C3AED; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; margin: 20px 0;">
-              Reset Password
-            </a>
-            <p>This link will expire in 1 hour.</p>
-            <p>If you didn't request this, you can safely ignore this email.</p>
-            <p>Best regards,<br>The Luma Team</p>
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="text-align: center; margin-bottom: 30px;">
+              <h1 style="color: #7C3AED; margin-bottom: 10px;">🌙 Luma</h1>
+              <h2 style="color: #374151; margin-top: 0;">Password Reset Request</h2>
+            </div>
+            
+            <p style="color: #374151; font-size: 16px; line-height: 1.5;">Hi ${user.username},</p>
+            <p style="color: #374151; font-size: 16px; line-height: 1.5;">We received a request to reset your Luma password. Use the code below in the Luma app:</p>
+            
+            <div style="background: #f8fafc; border: 2px solid #7C3AED; border-radius: 12px; padding: 30px; margin: 30px 0; text-align: center;">
+              <p style="color: #6b7280; font-size: 14px; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 1px;">Reset Code</p>
+              <div style="background: white; border-radius: 8px; padding: 20px; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                <span style="font-family: 'Courier New', monospace; font-size: 32px; font-weight: bold; color: #7C3AED; letter-spacing: 4px;">${resetToken}</span>
+              </div>
+            </div>
+            
+            <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 4px;">
+              <p style="margin: 0; color: #92400e; font-size: 14px;">
+                <strong>How to reset your password:</strong><br>
+                1. Open the Luma app<br>
+                2. Tap "Forgot Password?"<br>
+                3. Enter this code: <strong>${resetToken}</strong><br>
+                4. Create your new password
+              </p>
+            </div>
+            
+            <p style="color: #6b7280; font-size: 14px; line-height: 1.5;">This code will expire in <strong>1 hour</strong>.</p>
+            <p style="color: #6b7280; font-size: 14px; line-height: 1.5;">If you didn't request this reset, you can safely ignore this email.</p>
+            
+            <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
+            <p style="color: #9ca3af; font-size: 12px; text-align: center;">
+              Best regards,<br>The Luma Team
+            </p>
           </div>
         `
       });
 
       res.json({ 
         success: true, 
-        message: 'Password reset email sent successfully.' 
+        message: 'Password reset code sent to your email.' 
       });
 
     } catch (emailError) {
       console.error('Email sending error:', emailError);
-      res.status(500).json({ error: 'Failed to send reset email' });
+      res.status(500).json({ error: 'Failed to send reset email. Please try again.' });
     }
 
   } catch (error) {
@@ -254,7 +276,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
     const { token, newPassword } = req.body;
 
     if (!token || !newPassword) {
-      return res.status(400).json({ error: 'Token and new password are required' });
+      return res.status(400).json({ error: 'Reset code and new password are required' });
     }
 
     if (newPassword.length < 6) {
@@ -262,15 +284,15 @@ app.post('/api/auth/reset-password', async (req, res) => {
     }
 
     // Check if token exists and is valid
-    const resetData = passwordResetTokens[token];
+    const resetData = passwordResetTokens[token.toUpperCase()];
     if (!resetData) {
-      return res.status(400).json({ error: 'Invalid or expired reset token' });
+      return res.status(400).json({ error: 'Invalid or expired reset code' });
     }
 
     // Check if token is expired
     if (new Date() > resetData.expires) {
-      delete passwordResetTokens[token];
-      return res.status(400).json({ error: 'Reset token has expired' });
+      delete passwordResetTokens[token.toUpperCase()];
+      return res.status(400).json({ error: 'Reset code has expired. Please request a new one.' });
     }
 
     // Find user
@@ -287,11 +309,11 @@ app.post('/api/auth/reset-password', async (req, res) => {
     user.password = hashedPassword;
 
     // Remove used token
-    delete passwordResetTokens[token];
+    delete passwordResetTokens[token.toUpperCase()];
 
     res.json({
       success: true,
-      message: 'Password reset successfully'
+      message: 'Password reset successfully! You can now log in with your new password.'
     });
 
   } catch (error) {
@@ -419,8 +441,8 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
       body: JSON.stringify({
         model: 'gpt-4',
         messages: messages,
-        temperature: 0.8, // Slightly less random for more consistent empathy
-        max_tokens: 400   // Shorter responses for better conversation flow
+        temperature: 0.8,
+        max_tokens: 400
       }),
     });
     const data = await response.json();
