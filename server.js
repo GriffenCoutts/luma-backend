@@ -181,10 +181,13 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// FORGOT PASSWORD - Request Reset (FIXED EMAIL)
+// FORGOT PASSWORD - Request Reset (FULLY FIXED)
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
+
+    console.log('🔍 Password reset request for:', email);
+    console.log('🔑 RESEND_API_KEY exists:', !!process.env.RESEND_API_KEY);
 
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
@@ -192,6 +195,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
     // Find user by email
     const user = users.find(u => u.email === email);
+    console.log('👤 User found:', !!user);
+
     if (!user) {
       // Don't reveal if email exists or not for security
       return res.json({ 
@@ -210,63 +215,90 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       expires: expires
     };
 
-    // Send email with improved template
+    console.log('🎫 Generated reset token:', resetToken);
+
+    // Send email with Resend's default domain
     try {
-      await resend.emails.send({
-        from: 'Luma <noreply@resend.dev>', // Use resend.dev for testing
+      console.log('📧 Attempting to send email to:', email);
+      
+      const emailResult = await resend.emails.send({
+        from: 'onboarding@resend.dev', // FIXED: Using Resend's default domain
         to: [email],
-        subject: 'Reset Your Luma Password',
+        subject: 'Reset Your Luma Password 🌙',
         html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="text-align: center; margin-bottom: 30px;">
-              <h1 style="color: #7C3AED; margin-bottom: 10px;">🌙 Luma</h1>
-              <h2 style="color: #374151; margin-top: 0;">Password Reset Request</h2>
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #ffffff;">
+            <div style="text-align: center; margin-bottom: 40px; padding: 30px 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px;">
+              <h1 style="color: white; margin: 0; font-size: 32px; font-weight: 700;">🌙 Luma</h1>
+              <p style="color: rgba(255,255,255,0.9); margin: 8px 0 0 0; font-size: 16px;">Your AI Mental Health Companion</p>
             </div>
             
-            <p style="color: #374151; font-size: 16px; line-height: 1.5;">Hi ${user.username},</p>
-            <p style="color: #374151; font-size: 16px; line-height: 1.5;">We received a request to reset your Luma password. Use the code below in the Luma app:</p>
+            <div style="text-align: center; margin-bottom: 30px;">
+              <h2 style="color: #1f2937; margin: 0 0 16px 0; font-size: 28px; font-weight: 600;">Password Reset Request</h2>
+              <p style="color: #6b7280; font-size: 16px; line-height: 1.6; margin: 0;">Hi ${user.username}, we received a request to reset your Luma password.</p>
+            </div>
             
-            <div style="background: #f8fafc; border: 2px solid #7C3AED; border-radius: 12px; padding: 30px; margin: 30px 0; text-align: center;">
-              <p style="color: #6b7280; font-size: 14px; margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 1px;">Reset Code</p>
-              <div style="background: white; border-radius: 8px; padding: 20px; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                <span style="font-family: 'Courier New', monospace; font-size: 32px; font-weight: bold; color: #7C3AED; letter-spacing: 4px;">${resetToken}</span>
+            <div style="background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%); border: 3px solid #7c3aed; border-radius: 16px; padding: 40px; margin: 30px 0; text-align: center;">
+              <p style="color: #6b7280; font-size: 14px; margin: 0 0 16px 0; text-transform: uppercase; letter-spacing: 2px; font-weight: 600;">Your Reset Code</p>
+              <div style="background: white; border-radius: 12px; padding: 24px; display: inline-block; box-shadow: 0 8px 25px rgba(124, 58, 237, 0.15); border: 2px solid #7c3aed;">
+                <span style="font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 36px; font-weight: 900; color: #7c3aed; letter-spacing: 6px; text-shadow: 0 2px 4px rgba(124, 58, 237, 0.2);">${resetToken}</span>
               </div>
             </div>
             
-            <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 4px;">
-              <p style="margin: 0; color: #92400e; font-size: 14px;">
-                <strong>How to reset your password:</strong><br>
-                1. Open the Luma app<br>
-                2. Tap "Forgot Password?"<br>
-                3. Enter this code: <strong>${resetToken}</strong><br>
-                4. Create your new password
+            <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-left: 6px solid #f59e0b; padding: 24px; margin: 30px 0; border-radius: 8px;">
+              <h3 style="margin: 0 0 12px 0; color: #92400e; font-size: 18px; font-weight: 600;">📱 How to reset your password:</h3>
+              <ol style="margin: 0; padding-left: 20px; color: #92400e; font-size: 15px; line-height: 1.8;">
+                <li><strong>Open the Luma app</strong> on your device</li>
+                <li><strong>Tap "Forgot Password?"</strong> on the login screen</li>
+                <li><strong>Enter this code:</strong> <code style="background: rgba(146, 64, 14, 0.1); padding: 4px 8px; border-radius: 4px; font-family: monospace; font-weight: bold;">${resetToken}</code></li>
+                <li><strong>Create your new password</strong> and you're all set!</li>
+              </ol>
+            </div>
+            
+            <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin: 20px 0;">
+              <p style="margin: 0; color: #dc2626; font-size: 14px; line-height: 1.5;">
+                <strong>⏰ Important:</strong> This code will expire in <strong>1 hour</strong> for your security.
               </p>
             </div>
             
-            <p style="color: #6b7280; font-size: 14px; line-height: 1.5;">This code will expire in <strong>1 hour</strong>.</p>
-            <p style="color: #6b7280; font-size: 14px; line-height: 1.5;">If you didn't request this reset, you can safely ignore this email.</p>
+            <div style="text-align: center; margin: 40px 0; padding: 30px; background: #f9fafb; border-radius: 12px;">
+              <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0 0 8px 0;">If you didn't request this reset, you can safely ignore this email.</p>
+              <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0;">Your password will remain unchanged.</p>
+            </div>
             
-            <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
-            <p style="color: #9ca3af; font-size: 12px; text-align: center;">
-              Best regards,<br>The Luma Team
-            </p>
+            <hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+            
+            <div style="text-align: center;">
+              <p style="color: #9ca3af; font-size: 13px; margin: 0 0 8px 0;">
+                Take care of your mental health,
+              </p>
+              <p style="color: #7c3aed; font-size: 15px; font-weight: 600; margin: 0;">
+                💜 The Luma Team
+              </p>
+            </div>
           </div>
         `
       });
 
+      console.log('✅ Email sent successfully. Result:', emailResult);
+
       res.json({ 
         success: true, 
-        message: 'Password reset code sent to your email.' 
+        message: 'Password reset code sent to your email. Please check your inbox!' 
       });
 
     } catch (emailError) {
-      console.error('Email sending error:', emailError);
-      res.status(500).json({ error: 'Failed to send reset email. Please try again.' });
+      console.error('❌ Email sending failed:', emailError);
+      console.error('📋 Full error details:', JSON.stringify(emailError, null, 2));
+      
+      res.status(500).json({ 
+        error: 'Failed to send reset email. Please try again or contact support.',
+        details: process.env.NODE_ENV === 'development' ? emailError.message : undefined
+      });
     }
 
   } catch (error) {
-    console.error('Forgot password error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('💥 Forgot password error:', error);
+    res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });
 
@@ -275,23 +307,27 @@ app.post('/api/auth/reset-password', async (req, res) => {
   try {
     const { token, newPassword } = req.body;
 
+    console.log('🔄 Password reset attempt with token:', token);
+
     if (!token || !newPassword) {
       return res.status(400).json({ error: 'Reset code and new password are required' });
     }
 
     if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
-    // Check if token exists and is valid
+    // Check if token exists and is valid (case insensitive)
     const resetData = passwordResetTokens[token.toUpperCase()];
     if (!resetData) {
-      return res.status(400).json({ error: 'Invalid or expired reset code' });
+      console.log('❌ Invalid token:', token);
+      return res.status(400).json({ error: 'Invalid or expired reset code. Please request a new one.' });
     }
 
     // Check if token is expired
     if (new Date() > resetData.expires) {
       delete passwordResetTokens[token.toUpperCase()];
+      console.log('⏰ Token expired:', token);
       return res.status(400).json({ error: 'Reset code has expired. Please request a new one.' });
     }
 
@@ -311,14 +347,16 @@ app.post('/api/auth/reset-password', async (req, res) => {
     // Remove used token
     delete passwordResetTokens[token.toUpperCase()];
 
+    console.log('✅ Password reset successful for user:', user.username);
+
     res.json({
       success: true,
       message: 'Password reset successfully! You can now log in with your new password.'
     });
 
   } catch (error) {
-    console.error('Reset password error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('💥 Reset password error:', error);
+    res.status(500).json({ error: 'Server error. Please try again.' });
   }
 });
 
@@ -685,12 +723,16 @@ setInterval(() => {
   Object.keys(passwordResetTokens).forEach(token => {
     if (now > passwordResetTokens[token].expires) {
       delete passwordResetTokens[token];
+      console.log('🧹 Cleaned up expired token:', token);
     }
   });
 }, 3600000); // 1 hour
 
 app.listen(PORT, () => {
   console.log(`✅ Luma backend running on port ${PORT}`);
+  console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
+  console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing RESEND_API_KEY'}`);
+  console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
   console.log(`Available endpoints:`);
   console.log(`- POST /api/auth/register`);
   console.log(`- POST /api/auth/login`);
