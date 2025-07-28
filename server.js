@@ -82,10 +82,13 @@ app.post('/api/auth/register', async (req, res) => {
 
     users.push(newUser);
 
-    // Initialize user data
+    // Initialize user data with NEW FIELDS
     userData[userId] = {
       profile: {
         name: username,
+        firstName: "",        // NEW
+        lastName: "",         // NEW
+        pronouns: "",         // NEW
         age: "",
         birthDate: null,
         joinDate: new Date().toISOString(),
@@ -98,6 +101,10 @@ app.post('/api/auth/register', async (req, res) => {
       questionnaire: {
         completed: false,
         responses: {
+          firstName: "",              // NEW
+          lastName: "",               // NEW
+          birthDate: null,            // NEW
+          pronouns: "",               // NEW
           mainGoal: "",
           challenges: [],
           ageRange: "",
@@ -385,19 +392,33 @@ app.post('/api/auth/logout', authenticateToken, (req, res) => {
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
-// IMPROVED CHAT ENDPOINT (with better conversational AI)
+// IMPROVED CHAT ENDPOINT (with better conversational AI and name/pronouns context)
 app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
     const { message, chatHistory } = req.body;
     
     // Get user's questionnaire responses for context
     const userQuestionnaire = userData[req.user.userId]?.questionnaire;
+    const userProfile = userData[req.user.userId]?.profile;
     let questionnaireContext = '';
     
     if (userQuestionnaire && userQuestionnaire.completed && userQuestionnaire.responses) {
       const responses = userQuestionnaire.responses;
-      questionnaireContext = `\n\nIMPORTANT USER CONTEXT (reference naturally when relevant):
-- What brings them to Luma: ${responses.mainGoal || 'Not specified'}
+      questionnaireContext = `\n\nIMPORTANT USER CONTEXT (reference naturally when relevant):`;
+      
+      // NEW: Add personal information
+      if (responses.firstName) {
+        questionnaireContext += `\n- Name: ${responses.firstName} ${responses.lastName || ''} (call them ${responses.firstName})`;
+      }
+      if (responses.pronouns) {
+        questionnaireContext += `\n- Pronouns: ${responses.pronouns} (use these when referring to them)`;
+      }
+      if (responses.birthDate) {
+        const age = Math.floor((new Date() - new Date(responses.birthDate)) / (365.25 * 24 * 60 * 60 * 1000));
+        questionnaireContext += `\n- Age: ${age} years old`;
+      }
+      
+      questionnaireContext += `\n- What brings them to Luma: ${responses.mainGoal || 'Not specified'}
 - Current challenges: ${responses.challenges ? responses.challenges.join(', ') : 'Not specified'}
 - Age range: ${responses.ageRange || 'Not specified'}
 - Occupation: ${responses.occupation || 'Not specified'}
@@ -528,7 +549,25 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
     }
 
     if (!userData[req.user.userId]) {
-      userData[req.user.userId] = { profile: {}, questionnaire: {}, moodEntries: [], journalEntries: [] };
+      userData[req.user.userId] = { 
+        profile: {
+          name: "",
+          firstName: "",
+          lastName: "",
+          pronouns: "",
+          age: "",
+          birthDate: null,
+          joinDate: new Date().toISOString(),
+          profileColorHex: "800080",
+          notifications: true,
+          biometricAuth: false,
+          darkMode: false,
+          reminderTime: new Date().toISOString()
+        }, 
+        questionnaire: {}, 
+        moodEntries: [], 
+        journalEntries: [] 
+      };
     }
     
     userData[req.user.userId].questionnaire = {
@@ -544,7 +583,7 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
   }
 });
 
-// UPDATED PROFILE ENDPOINTS (with authentication)
+// UPDATED PROFILE ENDPOINTS (with authentication and new fields)
 app.get('/api/profile', authenticateToken, (req, res) => {
   try {
     const userProfile = userData[req.user.userId]?.profile;
@@ -560,16 +599,40 @@ app.get('/api/profile', authenticateToken, (req, res) => {
 
 app.post('/api/profile', authenticateToken, (req, res) => {
   try {
-    const { name, age, birthDate, joinDate, profileColorHex, notifications, biometricAuth, darkMode, reminderTime } = req.body;
+    const { 
+      name, 
+      firstName,        // NEW
+      lastName,         // NEW
+      pronouns,         // NEW
+      age, 
+      birthDate, 
+      joinDate, 
+      profileColorHex, 
+      notifications, 
+      biometricAuth, 
+      darkMode, 
+      reminderTime 
+    } = req.body;
     
     if (!userData[req.user.userId]) {
-      userData[req.user.userId] = { profile: {}, moodEntries: [], journalEntries: [] };
+      userData[req.user.userId] = { 
+        profile: {}, 
+        questionnaire: {
+          completed: false,
+          responses: {}
+        },
+        moodEntries: [], 
+        journalEntries: [] 
+      };
     }
 
     const currentProfile = userData[req.user.userId].profile;
     
     userData[req.user.userId].profile = {
       name: name || currentProfile.name,
+      firstName: firstName || currentProfile.firstName || "",           // NEW
+      lastName: lastName || currentProfile.lastName || "",              // NEW
+      pronouns: pronouns || currentProfile.pronouns || "",              // NEW
       age: age || currentProfile.age,
       birthDate: birthDate || currentProfile.birthDate,
       joinDate: joinDate || currentProfile.joinDate,
@@ -579,6 +642,9 @@ app.post('/api/profile', authenticateToken, (req, res) => {
       darkMode: darkMode !== undefined ? darkMode : currentProfile.darkMode,
       reminderTime: reminderTime || currentProfile.reminderTime
     };
+    
+    console.log('✅ Profile updated for user:', req.user.username);
+    console.log('   New profile data:', userData[req.user.userId].profile);
     
     res.json({ success: true, profile: userData[req.user.userId].profile });
   } catch (error) {
@@ -612,7 +678,7 @@ app.post('/api/mood', authenticateToken, (req, res) => {
     }
 
     if (!userData[req.user.userId]) {
-      userData[req.user.userId] = { profile: {}, moodEntries: [], journalEntries: [] };
+      userData[req.user.userId] = { profile: {}, questionnaire: {}, moodEntries: [], journalEntries: [] };
     }
     
     const moodEntry = {
@@ -655,7 +721,7 @@ app.post('/api/journal', authenticateToken, (req, res) => {
     }
 
     if (!userData[req.user.userId]) {
-      userData[req.user.userId] = { profile: {}, moodEntries: [], journalEntries: [] };
+      userData[req.user.userId] = { profile: {}, questionnaire: {}, moodEntries: [], journalEntries: [] };
     }
     
     const journalEntry = {
@@ -679,6 +745,9 @@ app.post('/api/reset', authenticateToken, (req, res) => {
     userData[req.user.userId] = {
       profile: {
         name: req.user.username,
+        firstName: "",
+        lastName: "",
+        pronouns: "",
         age: "",
         birthDate: null,
         joinDate: new Date().toISOString(),
@@ -687,6 +756,10 @@ app.post('/api/reset', authenticateToken, (req, res) => {
         biometricAuth: false,
         darkMode: false,
         reminderTime: new Date().toISOString()
+      },
+      questionnaire: {
+        completed: false,
+        responses: {}
       },
       moodEntries: [],
       journalEntries: []
