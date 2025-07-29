@@ -972,7 +972,33 @@ setInterval(() => {
     }
   });
 }, 3600000); // 1 hour
+// Add this temporary debug endpoint
+app.get('/api/debug/recent-chats/:username', (req, res) => {
+  const { username } = req.params;
+  const user = users.find(u => u.username === username);
+  
+  if (!user) {
+    return res.json({ error: 'User not found' });
+  }
+  
+  const userSessions = userData[user.id]?.chatSessions || [];
+  const recentSession = userSessions[userSessions.length - 1];
+  
+  res.json({
+    totalSessions: userSessions.length,
+    recentSession: recentSession ? {
+      id: recentSession.id,
+      messageCount: recentSession.messages.length,
+      messages: recentSession.messages.map(m => ({
+        role: m.role,
+        content: m.content.substring(0, 100) + '...',
+        timestamp: m.timestamp
+      }))
+    } : null
+  });
+});
 
+app.listen(PORT, () => {
 app.listen(PORT, () => {
   console.log(`✅ Luma backend running on port ${PORT}`);
   console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
