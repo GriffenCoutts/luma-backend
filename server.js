@@ -19,8 +19,48 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-t
 
 // In-memory storage (replace with database in production)
 let users = []; // { id, username, email, password, createdAt }
-let userData = {}; // { userId: { profile: {}, moodEntries: [], journalEntries: [] } }
+let userData = {}; // { userId: { profile: {}, moodEntries: [], journalEntries: [], chatSessions: [] } }
 let passwordResetTokens = {}; // { token: { userId, expires } }
+
+// UPDATED: Helper function to initialize user data with chat sessions
+function initializeUserData(userId, username) {
+  return {
+    profile: {
+      name: username,
+      firstName: "",
+      lastName: "",
+      pronouns: "",
+      age: "",
+      birthDate: null,
+      joinDate: new Date().toISOString(),
+      profileColorHex: "800080",
+      notifications: true,
+      biometricAuth: false,
+      darkMode: false,
+      reminderTime: new Date().toISOString()
+    },
+    questionnaire: {
+      completed: false,
+      responses: {
+        firstName: "",
+        lastName: "",
+        birthDate: null,
+        pronouns: "",
+        mainGoals: [],
+        challenges: [],
+        occupation: "",
+        supportSystem: "",
+        previousTherapy: "",
+        copingStrategies: [],
+        communicationStyle: ""
+      }
+    },
+    moodEntries: [],
+    journalEntries: [],
+    // NEW: Chat sessions storage
+    chatSessions: []
+  };
+}
 
 // AUTHENTICATION MIDDLEWARE
 const authenticateToken = (req, res, next) => {
@@ -40,7 +80,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// USER REGISTRATION
+// USER REGISTRATION - UPDATED to use new initialization
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -82,42 +122,8 @@ app.post('/api/auth/register', async (req, res) => {
 
     users.push(newUser);
 
-    // Initialize user data with UPDATED QUESTIONNAIRE FIELDS
-    userData[userId] = {
-      profile: {
-        name: username,
-        firstName: "",
-        lastName: "",
-        pronouns: "",
-        age: "",
-        birthDate: null,
-        joinDate: new Date().toISOString(),
-        profileColorHex: "800080",
-        notifications: true,
-        biometricAuth: false,
-        darkMode: false,
-        reminderTime: new Date().toISOString()
-      },
-      questionnaire: {
-        completed: false,
-        responses: {
-          firstName: "",
-          lastName: "",
-          birthDate: null,
-          pronouns: "",
-          mainGoals: [],              // UPDATED: Changed from mainGoal to mainGoals array
-          challenges: [],
-          // REMOVED: ageRange field (no longer needed since we get age from birthDate)
-          occupation: "",
-          supportSystem: "",
-          previousTherapy: "",
-          copingStrategies: [],
-          communicationStyle: ""
-        }
-      },
-      moodEntries: [],
-      journalEntries: []
-    };
+    // UPDATED: Initialize user data with chat sessions
+    userData[userId] = initializeUserData(userId, username);
 
     // Generate JWT token
     const token = jwt.sign(
@@ -392,49 +398,86 @@ app.post('/api/auth/logout', authenticateToken, (req, res) => {
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
-// UPDATED CHAT ENDPOINT (with better conversational AI and context from questionnaire)
+// UPDATED CHAT ENDPOINT with storage
 app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
-    const { message, chatHistory } = req.body;
+    const { message, chatHistory, sessionId } = req.body;
     
-    // Get user's questionnaire responses for context
+    // Initialize user data if doesn't exist
+    if (!userData[req.user.userId]) {
+      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
+    }
+
+    // Get or create chat session
+    let currentSession = null;
+    if (sessionId) {
+      currentSession = userData[req.user.userId].chatSessions.find(s => s.id === sessionId);
+    }
+    
+    if (!currentSession) {
+      currentSession = {
+        id: generateUUID(),
+        startTime: new Date().toISOString(),
+        lastActivity: new Date().toISOString(),
+        messages: [],
+        userContext: {
+          mood: null,
+          recentJournalThemes: [],
+          questionnaireCompleted: userData[req.user.userId].questionnaire.completed
+        }
+      };
+      userData[req.user.userId].chatSessions.push(currentSession);
+    }
+
+    // Add current user message to session
+    const userMessage = {
+      id: generateUUID(),
+      role: 'user',
+      content: message,
+      timestamp: new Date().toISOString()
+    };
+    currentSession.messages.push(userMessage);
+
+    // Get user context for AI
     const userQuestionnaire = userData[req.user.userId]?.questionnaire;
     const userProfile = userData[req.user.userId]?.profile;
-    let questionnaireContext = '';
+    const recentMoods = userData[req.user.userId]?.moodEntries?.slice(0, 5) || [];
+    const recentJournals = userData[req.user.userId]?.journalEntries?.slice(0, 3) || [];
     
+    // Update session context
+    currentSession.userContext = {
+      mood: recentMoods.length > 0 ? recentMoods[0].mood : null,
+      recentJournalThemes: recentJournals.map(j => j.content.substring(0, 100)),
+      questionnaireCompleted: userQuestionnaire?.completed || false,
+      lastMoodDate: recentMoods.length > 0 ? recentMoods[0].date : null
+    };
+
+    let questionnaireContext = '';
     if (userQuestionnaire && userQuestionnaire.completed && userQuestionnaire.responses) {
       const responses = userQuestionnaire.responses;
       questionnaireContext = `\n\nIMPORTANT USER CONTEXT (reference naturally when relevant):`;
       
-      // Add personal information
       if (responses.firstName) {
         questionnaireContext += `\n- Name: ${responses.firstName} ${responses.lastName || ''} (call them ${responses.firstName})`;
       }
       if (responses.pronouns) {
-        questionnaireContext += `\n- Pronouns: ${responses.pronouns} (use these when referring to them)`;
+        questionnaireContext += `\n- Pronouns: ${responses.pronouns}`;
       }
       if (responses.birthDate) {
         const age = Math.floor((new Date() - new Date(responses.birthDate)) / (365.25 * 24 * 60 * 60 * 1000));
         questionnaireContext += `\n- Age: ${age} years old`;
       }
       
-      // UPDATED: Handle mainGoals as array
       const goalsText = Array.isArray(responses.mainGoals) && responses.mainGoals.length > 0 
         ? responses.mainGoals.join(', ') 
         : 'Not specified';
       
-      questionnaireContext += `\n- What brings them to Luma: ${goalsText}
-- Current challenges: ${responses.challenges ? responses.challenges.join(', ') : 'Not specified'}
-- Occupation: ${responses.occupation || 'Not specified'}
-- Support system: ${responses.supportSystem || 'Not specified'}
-- Previous therapy/counseling: ${responses.previousTherapy || 'Not specified'}
-- Preferred coping strategies: ${responses.copingStrategies ? responses.copingStrategies.join(', ') : 'Not specified'}
-- Communication preference: ${responses.communicationStyle || 'Not specified'}
-
-Use this information to personalize your responses and reference relevant details when appropriate, but don't dump it all at once.`;
+      questionnaireContext += `\n- Goals: ${goalsText}
+- Challenges: ${responses.challenges ? responses.challenges.join(', ') : 'Not specified'}
+- Communication style: ${responses.communicationStyle || 'Not specified'}`;
     }
-    
-    // Build the conversation history for OpenAI
+
+    // Build messages for OpenAI (use stored session messages instead of chatHistory)
     const messages = [
       {
         role: 'system',
@@ -454,39 +497,29 @@ RESPONSE APPROACH:
 3. If appropriate, weave in ONE relevant insight or gentle suggestion naturally
 4. Keep the conversation flowing - focus on connection over solutions
 
-EXAMPLES OF GOOD RESPONSES:
-
-User: "Everyone is busy, I only have you to talk to"
-Good: "That sounds really isolating and lonely. It's hard when it feels like everyone around you is caught up in their own world and you're left feeling disconnected. What's been going on that's making you feel this way? Is this something recent, or has it been building up over time?"
-
-User: "I'm stressed about work"
-Good: "Work stress can really weigh on you and affect everything else. What's happening at work that's got you feeling this way? Is it your workload, a particular project, or maybe something with colleagues or your boss?"
-
-User: "I can't sleep"
-Good: "Sleep troubles are so frustrating - lying there while your mind just won't quiet down. How long has this been going on? What's usually running through your head when you're trying to fall asleep?"
-
 TONE: Warm, genuine, curious, supportive - like talking to someone who really cares about understanding your experience first, not just solving your problems.
 
 IMPORTANT - AVOID:
-- Numbered lists of suggestions (1) 2) 3))
+- Numbered lists of suggestions
 - Immediately jumping to solutions before understanding
 - Generic advice without knowing their specific context
 - Sounding clinical, robotic, or overly therapeutic
 - Giving multiple strategies at once
 
-Remember: People want to feel heard and understood FIRST, then gently guided toward insights. Focus on building emotional connection through genuine curiosity and empathy.${questionnaireContext}`
+Remember: People want to feel heard and understood FIRST, then gently guided toward insights.${questionnaireContext}`
       }
     ];
     
-    // Add conversation history if provided
-    if (chatHistory && Array.isArray(chatHistory)) {
-      chatHistory.forEach(msg => {
+    // Add recent conversation history from stored session (last 10 messages for context)
+    const recentMessages = currentSession.messages.slice(-11, -1); // Exclude the message we just added
+    recentMessages.forEach(msg => {
+      if (msg.role === 'user' || msg.role === 'assistant') {
         messages.push({
-          role: msg.isUser ? 'user' : 'assistant',
-          content: msg.text
+          role: msg.role,
+          content: msg.content
         });
-      });
-    }
+      }
+    });
     
     // Add the current message
     messages.push({
@@ -494,6 +527,7 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
       content: message
     });
     
+    // Call OpenAI
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -507,12 +541,26 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
         max_tokens: 400
       }),
     });
+    
     const data = await response.json();
     
     if (data.choices && data.choices[0]) {
+      // Add AI response to session
+      const aiMessage = {
+        id: generateUUID(),
+        role: 'assistant',
+        content: data.choices[0].message.content,
+        timestamp: new Date().toISOString()
+      };
+      currentSession.messages.push(aiMessage);
+      currentSession.lastActivity = new Date().toISOString();
+      
+      console.log(`💬 Chat session ${currentSession.id}: ${currentSession.messages.length} messages`);
+      
       res.json({ 
         response: data.choices[0].message.content,
-        success: true 
+        success: true,
+        sessionId: currentSession.id
       });
     } else {
       res.status(500).json({ 
@@ -521,11 +569,103 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
       });
     }
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Chat error:', error);
     res.status(500).json({ 
       error: 'Server error',
       success: false 
     });
+  }
+});
+
+// NEW: Get chat sessions
+app.get('/api/chat/sessions', authenticateToken, (req, res) => {
+  try {
+    const userSessions = userData[req.user.userId]?.chatSessions || [];
+    
+    // Return session summaries (without full message content for performance)
+    const sessionSummaries = userSessions.map(session => ({
+      id: session.id,
+      startTime: session.startTime,
+      lastActivity: session.lastActivity,
+      messageCount: session.messages.length,
+      lastMessage: session.messages.length > 0 ? 
+        session.messages[session.messages.length - 1].content.substring(0, 100) + '...' : 
+        'No messages'
+    }));
+    
+    res.json(sessionSummaries);
+  } catch (error) {
+    console.error('Get sessions error:', error);
+    res.status(500).json({ error: 'Failed to load chat sessions' });
+  }
+});
+
+// NEW: Get specific chat session with full messages
+app.get('/api/chat/sessions/:sessionId', authenticateToken, (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const userSessions = userData[req.user.userId]?.chatSessions || [];
+    const session = userSessions.find(s => s.id === sessionId);
+    
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    
+    res.json(session);
+  } catch (error) {
+    console.error('Get session error:', error);
+    res.status(500).json({ error: 'Failed to load chat session' });
+  }
+});
+
+// NEW: Data export endpoint for AI training
+app.get('/api/export/training-data', authenticateToken, (req, res) => {
+  try {
+    const userDataForExport = userData[req.user.userId];
+    if (!userDataForExport) {
+      return res.status(404).json({ error: 'No user data found' });
+    }
+
+    // Format data for AI training
+    const trainingData = {
+      userId: req.user.userId,
+      exportDate: new Date().toISOString(),
+      questionnaire: userDataForExport.questionnaire,
+      profile: {
+        // Only include non-sensitive profile data
+        age: userDataForExport.profile.age,
+        pronouns: userDataForExport.profile.pronouns,
+        joinDate: userDataForExport.profile.joinDate
+      },
+      conversations: userDataForExport.chatSessions.map(session => ({
+        sessionId: session.id,
+        startTime: session.startTime,
+        duration: session.lastActivity ? 
+          new Date(session.lastActivity) - new Date(session.startTime) : 0,
+        messageCount: session.messages.length,
+        messages: session.messages.map(msg => ({
+          role: msg.role,
+          content: msg.content,
+          timestamp: msg.timestamp
+        })),
+        userContext: session.userContext
+      })),
+      moodPatterns: userDataForExport.moodEntries.map(entry => ({
+        mood: entry.mood,
+        date: entry.date,
+        hasNote: !!entry.note
+      })),
+      journalPatterns: userDataForExport.journalEntries.map(entry => ({
+        date: entry.date,
+        hasPrompt: !!entry.prompt,
+        wordCount: entry.content.length
+      }))
+    };
+
+    res.json(trainingData);
+  } catch (error) {
+    console.error('Export error:', error);
+    res.status(500).json({ error: 'Failed to export training data' });
   }
 });
 
@@ -541,7 +681,7 @@ app.get('/api/questionnaire', authenticateToken, (req, res) => {
           lastName: "",
           birthDate: null,
           pronouns: "",
-          mainGoals: [],              // UPDATED: Array instead of string
+          mainGoals: [],
           challenges: [],
           occupation: "",
           supportSystem: "",
@@ -594,25 +734,7 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
     }
 
     if (!userData[req.user.userId]) {
-      userData[req.user.userId] = { 
-        profile: {
-          name: "",
-          firstName: "",
-          lastName: "",
-          pronouns: "",
-          age: "",
-          birthDate: null,
-          joinDate: new Date().toISOString(),
-          profileColorHex: "800080",
-          notifications: true,
-          biometricAuth: false,
-          darkMode: false,
-          reminderTime: new Date().toISOString()
-        }, 
-        questionnaire: {}, 
-        moodEntries: [], 
-        journalEntries: [] 
-      };
+      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
     }
     
     // Clean the responses - remove any old fields and ensure new structure
@@ -621,9 +743,8 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
       lastName: responses.lastName || "",
       birthDate: responses.birthDate || null,
       pronouns: responses.pronouns || "",
-      mainGoals: Array.isArray(responses.mainGoals) ? responses.mainGoals : [],  // UPDATED
+      mainGoals: Array.isArray(responses.mainGoals) ? responses.mainGoals : [],
       challenges: Array.isArray(responses.challenges) ? responses.challenges : [],
-      // REMOVED: ageRange field
       occupation: responses.occupation || "",
       supportSystem: responses.supportSystem || "",
       previousTherapy: responses.previousTherapy || "",
@@ -679,15 +800,7 @@ app.post('/api/profile', authenticateToken, (req, res) => {
     } = req.body;
     
     if (!userData[req.user.userId]) {
-      userData[req.user.userId] = { 
-        profile: {}, 
-        questionnaire: {
-          completed: false,
-          responses: {}
-        },
-        moodEntries: [], 
-        journalEntries: [] 
-      };
+      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
     }
 
     const currentProfile = userData[req.user.userId].profile;
@@ -741,7 +854,7 @@ app.post('/api/mood', authenticateToken, (req, res) => {
     }
 
     if (!userData[req.user.userId]) {
-      userData[req.user.userId] = { profile: {}, questionnaire: {}, moodEntries: [], journalEntries: [] };
+      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
     }
     
     const moodEntry = {
@@ -784,7 +897,7 @@ app.post('/api/journal', authenticateToken, (req, res) => {
     }
 
     if (!userData[req.user.userId]) {
-      userData[req.user.userId] = { profile: {}, questionnaire: {}, moodEntries: [], journalEntries: [] };
+      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
     }
     
     const journalEntry = {
@@ -802,44 +915,10 @@ app.post('/api/journal', authenticateToken, (req, res) => {
   }
 });
 
-// RESET USER DATA
+// UPDATED: Reset endpoint to include chat sessions
 app.post('/api/reset', authenticateToken, (req, res) => {
   try {
-    userData[req.user.userId] = {
-      profile: {
-        name: req.user.username,
-        firstName: "",
-        lastName: "",
-        pronouns: "",
-        age: "",
-        birthDate: null,
-        joinDate: new Date().toISOString(),
-        profileColorHex: "800080",
-        notifications: true,
-        biometricAuth: false,
-        darkMode: false,
-        reminderTime: new Date().toISOString()
-      },
-      questionnaire: {
-        completed: false,
-        responses: {
-          firstName: "",
-          lastName: "",
-          birthDate: null,
-          pronouns: "",
-          mainGoals: [],              // UPDATED: Array
-          challenges: [],
-          occupation: "",
-          supportSystem: "",
-          previousTherapy: "",
-          copingStrategies: [],
-          communicationStyle: ""
-        }
-      },
-      moodEntries: [],
-      journalEntries: []
-    };
-    
+    userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
     res.json({ success: true, message: 'Your data has been reset' });
   } catch (error) {
     console.error('Reset error:', error);
@@ -856,18 +935,29 @@ function generateUUID() {
   });
 }
 
-// HEALTH CHECK
+// UPDATED HEALTH CHECK
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '2.0.0 - Updated Questionnaire',
-    endpoints: ['/api/auth/*', '/api/questionnaire', '/api/chat', '/api/profile', '/api/mood', '/api/journal', '/api/reset'],
-    updates: [
-      'mainGoals is now an array (multiple selection)',
-      'Removed ageRange field (calculated from birthDate)',
-      'Updated questionnaire validation',
-      'Backward compatibility for existing data'
+    version: '2.1.0 - Chat Storage Added',
+    endpoints: [
+      '/api/auth/*', 
+      '/api/questionnaire', 
+      '/api/chat', 
+      '/api/chat/sessions', 
+      '/api/chat/sessions/:id',
+      '/api/export/training-data',
+      '/api/profile', 
+      '/api/mood', 
+      '/api/journal', 
+      '/api/reset'
+    ],
+    newFeatures: [
+      'Chat conversations now stored in backend',
+      'Chat session management',
+      'Training data export endpoint',
+      'User context tracking in sessions'
     ]
   });
 });
@@ -888,19 +978,24 @@ app.listen(PORT, () => {
   console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
   console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing RESEND_API_KEY'}`);
   console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
-  console.log(`\n📋 QUESTIONNAIRE UPDATES:`);
-  console.log(`   ✅ mainGoals is now an array (multiple selection)`);
-  console.log(`   ✅ Removed ageRange field (calculated from birthDate)`);
-  console.log(`   ✅ Updated validation and backward compatibility`);
-  console.log(`\nAvailable endpoints:`);
+  console.log(`\n💬 CHAT STORAGE UPDATES:`);
+  console.log(`   ✅ Chat conversations now stored in backend`);
+  console.log(`   ✅ Session management with context tracking`);
+  console.log(`   ✅ Training data export endpoint added`);
+  console.log(`   ✅ Better conversation continuity`);
+  console.log(`\nNew endpoints:`);
+  console.log(`- GET /api/chat/sessions (authenticated) - List chat sessions`);
+  console.log(`- GET /api/chat/sessions/:id (authenticated) - Get specific session`);
+  console.log(`- GET /api/export/training-data (authenticated) - Export for AI training`);
+  console.log(`\nExisting endpoints:`);
   console.log(`- POST /api/auth/register`);
   console.log(`- POST /api/auth/login`);
   console.log(`- POST /api/auth/forgot-password`);
   console.log(`- POST /api/auth/reset-password`);
   console.log(`- GET /api/auth/me`);
   console.log(`- POST /api/auth/logout`);
-  console.log(`- POST /api/chat (authenticated)`);
-  console.log(`- GET/POST /api/questionnaire (authenticated) - UPDATED`);
+  console.log(`- POST /api/chat (authenticated) - NOW WITH STORAGE`);
+  console.log(`- GET/POST /api/questionnaire (authenticated)`);
   console.log(`- GET/POST /api/profile (authenticated)`);
   console.log(`- GET/POST /api/mood (authenticated)`);
   console.log(`- GET/POST /api/journal (authenticated)`);
