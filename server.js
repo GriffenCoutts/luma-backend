@@ -3,6 +3,7 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Resend } = require('resend');
+const { Pool } = require('pg');
 require('dotenv').config();
 
 const app = express();
@@ -17,55 +18,171 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this';
 
-// In-memory storage (replace with database in production)
-let users = []; // { id, username, email, password, createdAt }
-let userData = {}; // { userId: { profile: {}, moodEntries: [], journalEntries: [], chatSessions: [] } }
-let passwordResetTokens = {}; // { token: { userId, expires } }
+// PostgreSQL Connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
-// UPDATED: Helper function to initialize user data with chat sessions
-function initializeUserData(userId, username) {
-  return {
-    profile: {
-      name: username,
-      firstName: "",
-      lastName: "",
-      pronouns: "",
-      age: "",
-      birthDate: null,
-      joinDate: new Date().toISOString(),
-      profileColorHex: "800080",
-      notifications: true,
-      biometricAuth: false,
-      darkMode: false,
-      reminderTime: new Date().toISOString()
-    },
-    questionnaire: {
-      completed: false,
-      responses: {
-        firstName: "",
-        lastName: "",
-        birthDate: null,
-        pronouns: "",
-        mainGoals: [],
-        challenges: [],
-        occupation: "",
-        supportSystem: "",
-        previousTherapy: "",
-        copingStrategies: [],
-        communicationStyle: ""
-      }
-    },
-    moodEntries: [],
-    journalEntries: [],
-    // NEW: Chat sessions storage
-    chatSessions: []
-  };
+// Test database connection
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('❌ Error connecting to PostgreSQL:', err.stack);
+  } else {
+    console.log('✅ Connected to PostgreSQL database');
+    release();
+  }
+});
+
+// Initialize database tables
+async function initializeDatabase() {
+  try {
+    console.log('🗄️ Initializing database tables...');
+    
+    // Users table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        username VARCHAR(255) UNIQUE NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // User profiles
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_profiles (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(255),
+        first_name VARCHAR(255),
+        last_name VARCHAR(255),
+        pronouns VARCHAR(50),
+        age VARCHAR(10),
+        birth_date DATE,
+        join_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        profile_color_hex VARCHAR(7) DEFAULT '#800080',
+        notifications BOOLEAN DEFAULT true,
+        biometric_auth BOOLEAN DEFAULT false,
+        dark_mode BOOLEAN DEFAULT false,
+        reminder_time TIME DEFAULT '19:00:00',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Questionnaire responses
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS questionnaire_responses (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        completed BOOLEAN DEFAULT false,
+        first_name VARCHAR(255),
+        last_name VARCHAR(255),
+        birth_date DATE,
+        pronouns VARCHAR(50),
+        main_goals TEXT[],
+        challenges TEXT[],
+        occupation VARCHAR(255),
+        support_system VARCHAR(255),
+        previous_therapy VARCHAR(255),
+        coping_strategies TEXT[],
+        communication_style VARCHAR(255),
+        completed_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Chat sessions
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS chat_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        start_time TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        last_activity TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        user_context JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Chat messages
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+        content TEXT NOT NULL,
+        timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Mood entries
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS mood_entries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        mood INTEGER NOT NULL CHECK (mood >= 1 AND mood <= 10),
+        note TEXT,
+        entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Journal entries
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS journal_entries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        prompt TEXT,
+        entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Password reset tokens
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        token VARCHAR(10) PRIMARY KEY,
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Create indexes for better performance
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+      CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+      CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_chat_sessions_start_time ON chat_sessions(start_time);
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
+      CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_mood_entries_user_id ON mood_entries(user_id);
+      CREATE INDEX IF NOT EXISTS idx_mood_entries_date ON mood_entries(entry_date);
+      CREATE INDEX IF NOT EXISTS idx_journal_entries_user_id ON journal_entries(user_id);
+      CREATE INDEX IF NOT EXISTS idx_journal_entries_date ON journal_entries(entry_date);
+      CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires ON password_reset_tokens(expires_at);
+    `);
+
+    console.log('✅ Database tables initialized successfully');
+  } catch (error) {
+    console.error('❌ Error initializing database:', error);
+  }
 }
+
+// Initialize database on startup
+initializeDatabase();
 
 // AUTHENTICATION MIDDLEWARE
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
     return res.status(401).json({ error: 'Access token required' });
@@ -80,12 +197,11 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// USER REGISTRATION - UPDATED to use new initialization
+// USER REGISTRATION
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
-    // Basic validation
     if (!username || !email || !password) {
       return res.status(400).json({ error: 'Username, email, and password are required' });
     }
@@ -94,15 +210,18 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: 'Please enter a valid email address' });
     }
 
     // Check if user already exists
-    const existingUser = users.find(u => u.username === username || u.email === email);
-    if (existingUser) {
+    const existingUser = await pool.query(
+      'SELECT id FROM users WHERE username = $1 OR email = $2',
+      [username, email]
+    );
+
+    if (existingUser.rows.length > 0) {
       return res.status(400).json({ error: 'Username or email already exists' });
     }
 
@@ -111,23 +230,30 @@ app.post('/api/auth/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
     // Create user
-    const userId = generateUUID();
-    const newUser = {
-      id: userId,
-      username,
-      email,
-      password: hashedPassword,
-      createdAt: new Date().toISOString()
-    };
+    const userResult = await pool.query(
+      'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, created_at',
+      [username, email, hashedPassword]
+    );
 
-    users.push(newUser);
+    const newUser = userResult.rows[0];
 
-    // UPDATED: Initialize user data with chat sessions
-    userData[userId] = initializeUserData(userId, username);
+    // Create user profile
+    await pool.query(
+      `INSERT INTO user_profiles (user_id, name, first_name, last_name, pronouns, age, birth_date, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time) 
+       VALUES ($1, $2, '', '', '', '', NULL, NOW(), '#800080', true, false, false, '19:00:00')`,
+      [newUser.id, username]
+    );
+
+    // Create empty questionnaire response
+    await pool.query(
+      `INSERT INTO questionnaire_responses (user_id, completed, first_name, last_name, birth_date, pronouns, main_goals, challenges, occupation, support_system, previous_therapy, coping_strategies, communication_style) 
+       VALUES ($1, false, '', '', NULL, '', '{}', '{}', '', '', '', '{}', '')`,
+      [newUser.id]
+    );
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: userId, username: username },
+      { userId: newUser.id, username: newUser.username },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -137,9 +263,9 @@ app.post('/api/auth/register', async (req, res) => {
       message: 'User registered successfully',
       token,
       user: {
-        id: userId,
-        username,
-        email
+        id: newUser.id,
+        username: newUser.username,
+        email: newUser.email
       }
     });
 
@@ -159,13 +285,19 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Find user (allow login with username or email)
-    const user = users.find(u => u.username === username || u.email === username);
-    if (!user) {
+    const userResult = await pool.query(
+      'SELECT id, username, email, password_hash FROM users WHERE username = $1 OR email = $1',
+      [username]
+    );
+
+    if (userResult.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    const user = userResult.rows[0];
+
     // Check password
-    const isValidPassword = await bcrypt.compare(password, user.password);
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
     if (!isValidPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -200,42 +332,39 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     const { email } = req.body;
 
     console.log('🔍 Password reset request for:', email);
-    console.log('🔑 RESEND_API_KEY exists:', !!process.env.RESEND_API_KEY);
 
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
     }
 
     // Find user by email
-    const user = users.find(u => u.email === email);
-    console.log('👤 User found:', !!user);
-
-    if (!user) {
-      // Don't reveal if email exists or not for security
+    const userResult = await pool.query('SELECT id, username FROM users WHERE email = $1', [email]);
+    
+    if (userResult.rows.length === 0) {
       return res.json({ 
         success: true, 
         message: 'If an account with that email exists, we have sent a password reset code.' 
       });
     }
 
-    // Generate reset token (shorter, more user-friendly)
+    const user = userResult.rows[0];
+
+    // Generate reset token
     const resetToken = Math.random().toString(36).substring(2, 8).toUpperCase();
     const expires = new Date(Date.now() + 3600000); // 1 hour from now
 
-    // Store reset token
-    passwordResetTokens[resetToken] = {
-      userId: user.id,
-      expires: expires
-    };
+    // Store reset token in database
+    await pool.query(
+      'INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES ($1, $2, $3) ON CONFLICT (token) DO UPDATE SET user_id = $2, expires_at = $3',
+      [resetToken, user.id, expires]
+    );
 
     console.log('🎫 Generated reset token:', resetToken);
 
-    // Send email with Resend's default domain
+    // Send email
     try {
-      console.log('📧 Attempting to send email to:', email);
-      
       const emailResult = await resend.emails.send({
-        from: 'onboarding@resend.dev', // FIXED: Using Resend's default domain
+        from: 'onboarding@resend.dev',
         to: [email],
         subject: 'Reset Your Luma Password 🌙',
         html: `
@@ -292,7 +421,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         `
       });
 
-      console.log('✅ Email sent successfully. Result:', emailResult);
+      console.log('✅ Email sent successfully');
 
       res.json({ 
         success: true, 
@@ -301,11 +430,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
     } catch (emailError) {
       console.error('❌ Email sending failed:', emailError);
-      console.error('📋 Full error details:', JSON.stringify(emailError, null, 2));
-      
       res.status(500).json({ 
-        error: 'Failed to send reset email. Please try again or contact support.',
-        details: process.env.NODE_ENV === 'development' ? emailError.message : undefined
+        error: 'Failed to send reset email. Please try again or contact support.'
       });
     }
 
@@ -320,8 +446,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
   try {
     const { token, newPassword } = req.body;
 
-    console.log('🔄 Password reset attempt with token:', token);
-
     if (!token || !newPassword) {
       return res.status(400).json({ error: 'Reset code and new password are required' });
     }
@@ -330,24 +454,23 @@ app.post('/api/auth/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
-    // Check if token exists and is valid (case insensitive)
-    const resetData = passwordResetTokens[token.toUpperCase()];
-    if (!resetData) {
-      console.log('❌ Invalid token:', token);
+    // Check if token exists and is valid
+    const tokenResult = await pool.query(
+      'SELECT user_id, expires_at FROM password_reset_tokens WHERE token = $1',
+      [token.toUpperCase()]
+    );
+
+    if (tokenResult.rows.length === 0) {
       return res.status(400).json({ error: 'Invalid or expired reset code. Please request a new one.' });
     }
 
-    // Check if token is expired
-    if (new Date() > resetData.expires) {
-      delete passwordResetTokens[token.toUpperCase()];
-      console.log('⏰ Token expired:', token);
-      return res.status(400).json({ error: 'Reset code has expired. Please request a new one.' });
-    }
+    const resetData = tokenResult.rows[0];
 
-    // Find user
-    const user = users.find(u => u.id === resetData.userId);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+    // Check if token is expired
+    if (new Date() > resetData.expires_at) {
+      // Remove expired token
+      await pool.query('DELETE FROM password_reset_tokens WHERE token = $1', [token.toUpperCase()]);
+      return res.status(400).json({ error: 'Reset code has expired. Please request a new one.' });
     }
 
     // Hash new password
@@ -355,12 +478,15 @@ app.post('/api/auth/reset-password', async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
 
     // Update user password
-    user.password = hashedPassword;
+    await pool.query(
+      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+      [hashedPassword, resetData.user_id]
+    );
 
     // Remove used token
-    delete passwordResetTokens[token.toUpperCase()];
+    await pool.query('DELETE FROM password_reset_tokens WHERE token = $1', [token.toUpperCase()]);
 
-    console.log('✅ Password reset successful for user:', user.username);
+    console.log('✅ Password reset successful for user:', resetData.user_id);
 
     res.json({
       success: true,
@@ -374,19 +500,18 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // GET CURRENT USER
-app.get('/api/auth/me', authenticateToken, (req, res) => {
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
-    const user = users.find(u => u.id === req.user.userId);
-    if (!user) {
+    const userResult = await pool.query(
+      'SELECT id, username, email, created_at FROM users WHERE id = $1',
+      [req.user.userId]
+    );
+
+    if (userResult.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json({
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      createdAt: user.createdAt
-    });
+    res.json(userResult.rows[0]);
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ error: 'Server error' });
@@ -398,86 +523,100 @@ app.post('/api/auth/logout', authenticateToken, (req, res) => {
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
-// UPDATED CHAT ENDPOINT with storage
+// CHAT ENDPOINT with PostgreSQL storage
 app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
     const { message, chatHistory, sessionId } = req.body;
     
-    // Initialize user data if doesn't exist
-    if (!userData[req.user.userId]) {
-      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
-    }
-
-    // Get or create chat session
     let currentSession = null;
+
     if (sessionId) {
-      currentSession = userData[req.user.userId].chatSessions.find(s => s.id === sessionId);
+      // Try to find existing session
+      const sessionResult = await pool.query(
+        'SELECT * FROM chat_sessions WHERE id = $1 AND user_id = $2',
+        [sessionId, req.user.userId]
+      );
+      
+      if (sessionResult.rows.length > 0) {
+        currentSession = sessionResult.rows[0];
+      }
     }
     
     if (!currentSession) {
-      currentSession = {
-        id: generateUUID(),
-        startTime: new Date().toISOString(),
-        lastActivity: new Date().toISOString(),
-        messages: [],
-        userContext: {
-          mood: null,
-          recentJournalThemes: [],
-          questionnaireCompleted: userData[req.user.userId].questionnaire.completed
-        }
-      };
-      userData[req.user.userId].chatSessions.push(currentSession);
+      // Create new session
+      const sessionResult = await pool.query(
+        'INSERT INTO chat_sessions (user_id, start_time, last_activity, user_context) VALUES ($1, NOW(), NOW(), $2) RETURNING *',
+        [req.user.userId, JSON.stringify({ mood: null, recentJournalThemes: [], questionnaireCompleted: false })]
+      );
+      currentSession = sessionResult.rows[0];
     }
 
     // Add current user message to session
-    const userMessage = {
-      id: generateUUID(),
-      role: 'user',
-      content: message,
-      timestamp: new Date().toISOString()
-    };
-    currentSession.messages.push(userMessage);
+    await pool.query(
+      'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+      [currentSession.id, 'user', message]
+    );
 
     // Get user context for AI
-    const userQuestionnaire = userData[req.user.userId]?.questionnaire;
-    const userProfile = userData[req.user.userId]?.profile;
-    const recentMoods = userData[req.user.userId]?.moodEntries?.slice(0, 5) || [];
-    const recentJournals = userData[req.user.userId]?.journalEntries?.slice(0, 3) || [];
-    
+    const questionnaireResult = await pool.query(
+      'SELECT * FROM questionnaire_responses WHERE user_id = $1',
+      [req.user.userId]
+    );
+
+    const profileResult = await pool.query(
+      'SELECT * FROM user_profiles WHERE user_id = $1',
+      [req.user.userId]
+    );
+
+    const recentMoodsResult = await pool.query(
+      'SELECT mood, entry_date FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 5',
+      [req.user.userId]
+    );
+
+    const recentJournalsResult = await pool.query(
+      'SELECT content FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 3',
+      [req.user.userId]
+    );
+
     // Update session context
-    currentSession.userContext = {
-      mood: recentMoods.length > 0 ? recentMoods[0].mood : null,
-      recentJournalThemes: recentJournals.map(j => j.content.substring(0, 100)),
-      questionnaireCompleted: userQuestionnaire?.completed || false,
-      lastMoodDate: recentMoods.length > 0 ? recentMoods[0].date : null
+    const userContext = {
+      mood: recentMoodsResult.rows.length > 0 ? recentMoodsResult.rows[0].mood : null,
+      recentJournalThemes: recentJournalsResult.rows.map(j => j.content.substring(0, 100)),
+      questionnaireCompleted: questionnaireResult.rows.length > 0 ? questionnaireResult.rows[0].completed : false,
+      lastMoodDate: recentMoodsResult.rows.length > 0 ? recentMoodsResult.rows[0].entry_date : null
     };
 
+    await pool.query(
+      'UPDATE chat_sessions SET last_activity = NOW(), user_context = $1 WHERE id = $2',
+      [JSON.stringify(userContext), currentSession.id]
+    );
+
     let questionnaireContext = '';
-    if (userQuestionnaire && userQuestionnaire.completed && userQuestionnaire.responses) {
-      const responses = userQuestionnaire.responses;
+    if (questionnaireResult.rows.length > 0 && questionnaireResult.rows[0].completed) {
+      const responses = questionnaireResult.rows[0];
       questionnaireContext = `\n\nIMPORTANT USER CONTEXT (reference naturally when relevant):`;
       
-      if (responses.firstName) {
-        questionnaireContext += `\n- Name: ${responses.firstName} ${responses.lastName || ''} (call them ${responses.firstName})`;
+      if (responses.first_name) {
+        questionnaireContext += `\n- Name: ${responses.first_name} ${responses.last_name || ''} (call them ${responses.first_name})`;
       }
       if (responses.pronouns) {
         questionnaireContext += `\n- Pronouns: ${responses.pronouns}`;
       }
-      if (responses.birthDate) {
-        const age = Math.floor((new Date() - new Date(responses.birthDate)) / (365.25 * 24 * 60 * 60 * 1000));
+      if (responses.birth_date) {
+        const age = Math.floor((new Date() - new Date(responses.birth_date)) / (365.25 * 24 * 60 * 60 * 1000));
         questionnaireContext += `\n- Age: ${age} years old`;
       }
       
-      const goalsText = Array.isArray(responses.mainGoals) && responses.mainGoals.length > 0 
-        ? responses.mainGoals.join(', ') 
+      const goalsText = responses.main_goals && responses.main_goals.length > 0 
+        ? responses.main_goals.join(', ') 
         : 'Not specified';
       
       questionnaireContext += `\n- Goals: ${goalsText}
 - Challenges: ${responses.challenges ? responses.challenges.join(', ') : 'Not specified'}
-- Communication style: ${responses.communicationStyle || 'Not specified'}`;
+- Communication style: ${responses.communication_style || 'Not specified'}`;
     }
 
-    // Build messages for OpenAI (use stored session messages instead of chatHistory)
+    // Build messages for OpenAI using stored session messages
     const messages = [
       {
         role: 'system',
@@ -511,7 +650,13 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
     ];
     
     // Add recent conversation history from stored session (last 10 messages for context)
-    const recentMessages = currentSession.messages.slice(-11, -1); // Exclude the message we just added
+    const recentMessagesResult = await pool.query(
+      'SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY timestamp DESC LIMIT 11',
+      [currentSession.id]
+    );
+
+    // Reverse to get chronological order, exclude the message we just added
+    const recentMessages = recentMessagesResult.rows.reverse().slice(0, -1);
     recentMessages.forEach(msg => {
       if (msg.role === 'user' || msg.role === 'assistant') {
         messages.push({
@@ -546,16 +691,18 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
     
     if (data.choices && data.choices[0]) {
       // Add AI response to session
-      const aiMessage = {
-        id: generateUUID(),
-        role: 'assistant',
-        content: data.choices[0].message.content,
-        timestamp: new Date().toISOString()
-      };
-      currentSession.messages.push(aiMessage);
-      currentSession.lastActivity = new Date().toISOString();
+      await pool.query(
+        'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+        [currentSession.id, 'assistant', data.choices[0].message.content]
+      );
+
+      // Count messages in session
+      const messageCountResult = await pool.query(
+        'SELECT COUNT(*) as count FROM chat_messages WHERE session_id = $1',
+        [currentSession.id]
+      );
       
-      console.log(`💬 Chat session ${currentSession.id}: ${currentSession.messages.length} messages`);
+      console.log(`💬 Chat session ${currentSession.id}: ${messageCountResult.rows[0].count} messages`);
       
       res.json({ 
         response: data.choices[0].message.content,
@@ -577,19 +724,37 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
   }
 });
 
-// NEW: Get chat sessions
-app.get('/api/chat/sessions', authenticateToken, (req, res) => {
+// GET CHAT SESSIONS
+app.get('/api/chat/sessions', authenticateToken, async (req, res) => {
   try {
-    const userSessions = userData[req.user.userId]?.chatSessions || [];
+    const sessionsResult = await pool.query(
+      `SELECT 
+        cs.id,
+        cs.start_time,
+        cs.last_activity,
+        COUNT(cm.id) as message_count,
+        cm_last.content as last_message
+      FROM chat_sessions cs
+      LEFT JOIN chat_messages cm ON cs.id = cm.session_id
+      LEFT JOIN LATERAL (
+        SELECT content FROM chat_messages 
+        WHERE session_id = cs.id 
+        ORDER BY timestamp DESC 
+        LIMIT 1
+      ) cm_last ON true
+      WHERE cs.user_id = $1
+      GROUP BY cs.id, cs.start_time, cs.last_activity, cm_last.content
+      ORDER BY cs.last_activity DESC`,
+      [req.user.userId]
+    );
     
-    // Return session summaries (without full message content for performance)
-    const sessionSummaries = userSessions.map(session => ({
+    const sessionSummaries = sessionsResult.rows.map(session => ({
       id: session.id,
-      startTime: session.startTime,
-      lastActivity: session.lastActivity,
-      messageCount: session.messages.length,
-      lastMessage: session.messages.length > 0 ? 
-        session.messages[session.messages.length - 1].content.substring(0, 100) + '...' : 
+      startTime: session.start_time,
+      lastActivity: session.last_activity,
+      messageCount: parseInt(session.message_count),
+      lastMessage: session.last_message ? 
+        session.last_message.substring(0, 100) + '...' : 
         'No messages'
     }));
     
@@ -600,16 +765,29 @@ app.get('/api/chat/sessions', authenticateToken, (req, res) => {
   }
 });
 
-// NEW: Get specific chat session with full messages
-app.get('/api/chat/sessions/:sessionId', authenticateToken, (req, res) => {
+// GET SPECIFIC CHAT SESSION
+app.get('/api/chat/sessions/:sessionId', authenticateToken, async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const userSessions = userData[req.user.userId]?.chatSessions || [];
-    const session = userSessions.find(s => s.id === sessionId);
     
-    if (!session) {
+    const sessionResult = await pool.query(
+      'SELECT * FROM chat_sessions WHERE id = $1 AND user_id = $2',
+      [sessionId, req.user.userId]
+    );
+    
+    if (sessionResult.rows.length === 0) {
       return res.status(404).json({ error: 'Session not found' });
     }
+    
+    const messagesResult = await pool.query(
+      'SELECT id, role, content, timestamp FROM chat_messages WHERE session_id = $1 ORDER BY timestamp',
+      [sessionId]
+    );
+    
+    const session = {
+      ...sessionResult.rows[0],
+      messages: messagesResult.rows
+    };
     
     res.json(session);
   } catch (error) {
@@ -618,48 +796,72 @@ app.get('/api/chat/sessions/:sessionId', authenticateToken, (req, res) => {
   }
 });
 
-// NEW: Data export endpoint for AI training
-app.get('/api/export/training-data', authenticateToken, (req, res) => {
+// EXPORT TRAINING DATA
+app.get('/api/export/training-data', authenticateToken, async (req, res) => {
   try {
-    const userDataForExport = userData[req.user.userId];
-    if (!userDataForExport) {
-      return res.status(404).json({ error: 'No user data found' });
-    }
+    // Get user's questionnaire data
+    const questionnaireResult = await pool.query(
+      'SELECT * FROM questionnaire_responses WHERE user_id = $1',
+      [req.user.userId]
+    );
+
+    // Get user's profile data
+    const profileResult = await pool.query(
+      'SELECT age, pronouns, join_date FROM user_profiles WHERE user_id = $1',
+      [req.user.userId]
+    );
+
+    // Get conversations
+    const conversationsResult = await pool.query(
+      `SELECT 
+        cs.id as session_id,
+        cs.start_time,
+        cs.last_activity,
+        cs.user_context,
+        json_agg(
+          json_build_object(
+            'role', cm.role,
+            'content', cm.content,
+            'timestamp', cm.timestamp
+          ) ORDER BY cm.timestamp
+        ) as messages
+      FROM chat_sessions cs
+      LEFT JOIN chat_messages cm ON cs.id = cm.session_id
+      WHERE cs.user_id = $1
+      GROUP BY cs.id, cs.start_time, cs.last_activity, cs.user_context
+      ORDER BY cs.start_time`,
+      [req.user.userId]
+    );
+
+    // Get mood patterns
+    const moodResult = await pool.query(
+      'SELECT mood, entry_date, (note IS NOT NULL) as has_note FROM mood_entries WHERE user_id = $1 ORDER BY entry_date',
+      [req.user.userId]
+    );
+
+    // Get journal patterns
+    const journalResult = await pool.query(
+      'SELECT entry_date, (prompt IS NOT NULL) as has_prompt, LENGTH(content) as word_count FROM journal_entries WHERE user_id = $1 ORDER BY entry_date',
+      [req.user.userId]
+    );
 
     // Format data for AI training
     const trainingData = {
       userId: req.user.userId,
       exportDate: new Date().toISOString(),
-      questionnaire: userDataForExport.questionnaire,
-      profile: {
-        // Only include non-sensitive profile data
-        age: userDataForExport.profile.age,
-        pronouns: userDataForExport.profile.pronouns,
-        joinDate: userDataForExport.profile.joinDate
-      },
-      conversations: userDataForExport.chatSessions.map(session => ({
-        sessionId: session.id,
-        startTime: session.startTime,
-        duration: session.lastActivity ? 
-          new Date(session.lastActivity) - new Date(session.startTime) : 0,
-        messageCount: session.messages.length,
-        messages: session.messages.map(msg => ({
-          role: msg.role,
-          content: msg.content,
-          timestamp: msg.timestamp
-        })),
-        userContext: session.userContext
+      questionnaire: questionnaireResult.rows[0] || null,
+      profile: profileResult.rows[0] || null,
+      conversations: conversationsResult.rows.map(conv => ({
+        sessionId: conv.session_id,
+        startTime: conv.start_time,
+        duration: conv.last_activity ? 
+          new Date(conv.last_activity) - new Date(conv.start_time) : 0,
+        messageCount: conv.messages ? conv.messages.length : 0,
+        messages: conv.messages || [],
+        userContext: conv.user_context
       })),
-      moodPatterns: userDataForExport.moodEntries.map(entry => ({
-        mood: entry.mood,
-        date: entry.date,
-        hasNote: !!entry.note
-      })),
-      journalPatterns: userDataForExport.journalEntries.map(entry => ({
-        date: entry.date,
-        hasPrompt: !!entry.prompt,
-        wordCount: entry.content.length
-      }))
+      moodPatterns: moodResult.rows,
+      journalPatterns: journalResult.rows
     };
 
     res.json(trainingData);
@@ -669,11 +871,15 @@ app.get('/api/export/training-data', authenticateToken, (req, res) => {
   }
 });
 
-// UPDATED QUESTIONNAIRE ENDPOINTS
-app.get('/api/questionnaire', authenticateToken, (req, res) => {
+// QUESTIONNAIRE ENDPOINTS
+app.get('/api/questionnaire', authenticateToken, async (req, res) => {
   try {
-    const userQuestionnaire = userData[req.user.userId]?.questionnaire;
-    if (!userQuestionnaire) {
+    const questionnaireResult = await pool.query(
+      'SELECT * FROM questionnaire_responses WHERE user_id = $1',
+      [req.user.userId]
+    );
+    
+    if (questionnaireResult.rows.length === 0) {
       return res.json({ 
         completed: false, 
         responses: {
@@ -692,20 +898,31 @@ app.get('/api/questionnaire', authenticateToken, (req, res) => {
       });
     }
     
-    // Ensure backward compatibility - convert old mainGoal to mainGoals
-    if (userQuestionnaire.responses && userQuestionnaire.responses.mainGoal && !userQuestionnaire.responses.mainGoals) {
-      userQuestionnaire.responses.mainGoals = [userQuestionnaire.responses.mainGoal];
-      delete userQuestionnaire.responses.mainGoal;
-    }
-    
-    res.json(userQuestionnaire);
+    const questionnaire = questionnaireResult.rows[0];
+    res.json({
+      completed: questionnaire.completed,
+      responses: {
+        firstName: questionnaire.first_name || "",
+        lastName: questionnaire.last_name || "",
+        birthDate: questionnaire.birth_date,
+        pronouns: questionnaire.pronouns || "",
+        mainGoals: questionnaire.main_goals || [],
+        challenges: questionnaire.challenges || [],
+        occupation: questionnaire.occupation || "",
+        supportSystem: questionnaire.support_system || "",
+        previousTherapy: questionnaire.previous_therapy || "",
+        copingStrategies: questionnaire.coping_strategies || [],
+        communicationStyle: questionnaire.communication_style || ""
+      },
+      completedAt: questionnaire.completed_at
+    });
   } catch (error) {
     console.error('Questionnaire load error:', error);
     res.status(500).json({ error: 'Failed to load questionnaire' });
   }
 });
 
-app.post('/api/questionnaire', authenticateToken, (req, res) => {
+app.post('/api/questionnaire', authenticateToken, async (req, res) => {
   try {
     const { responses } = req.body;
     
@@ -713,7 +930,6 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
       return res.status(400).json({ error: 'Invalid questionnaire responses' });
     }
 
-    // UPDATED VALIDATION for new questionnaire structure
     const requiredFields = ['firstName', 'pronouns', 'mainGoals', 'challenges', 'occupation', 'supportSystem', 'copingStrategies', 'previousTherapy', 'communicationStyle'];
     const missingFields = requiredFields.filter(field => {
       if (Array.isArray(responses[field])) {
@@ -728,40 +944,70 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
       });
     }
 
-    // Validate mainGoals is an array
     if (!Array.isArray(responses.mainGoals)) {
       return res.status(400).json({ error: 'mainGoals must be an array' });
     }
 
-    if (!userData[req.user.userId]) {
-      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
-    }
-    
-    // Clean the responses - remove any old fields and ensure new structure
-    const cleanedResponses = {
-      firstName: responses.firstName || "",
-      lastName: responses.lastName || "",
-      birthDate: responses.birthDate || null,
-      pronouns: responses.pronouns || "",
-      mainGoals: Array.isArray(responses.mainGoals) ? responses.mainGoals : [],
-      challenges: Array.isArray(responses.challenges) ? responses.challenges : [],
-      occupation: responses.occupation || "",
-      supportSystem: responses.supportSystem || "",
-      previousTherapy: responses.previousTherapy || "",
-      copingStrategies: Array.isArray(responses.copingStrategies) ? responses.copingStrategies : [],
-      communicationStyle: responses.communicationStyle || ""
-    };
-    
-    userData[req.user.userId].questionnaire = {
-      completed: true,
-      responses: cleanedResponses,
-      completedAt: new Date().toISOString()
-    };
+    // Update questionnaire responses
+    await pool.query(
+      `UPDATE questionnaire_responses 
+       SET completed = true, 
+           first_name = $1, 
+           last_name = $2, 
+           birth_date = $3, 
+           pronouns = $4, 
+           main_goals = $5, 
+           challenges = $6, 
+           occupation = $7, 
+           support_system = $8, 
+           previous_therapy = $9, 
+           coping_strategies = $10, 
+           communication_style = $11, 
+           completed_at = NOW(),
+           updated_at = NOW()
+       WHERE user_id = $12`,
+      [
+        responses.firstName || "",
+        responses.lastName || "",
+        responses.birthDate || null,
+        responses.pronouns || "",
+        responses.mainGoals || [],
+        responses.challenges || [],
+        responses.occupation || "",
+        responses.supportSystem || "",
+        responses.previousTherapy || "",
+        responses.copingStrategies || [],
+        responses.communicationStyle || "",
+        req.user.userId
+      ]
+    );
+
+    // Update user profile with questionnaire data
+    await pool.query(
+      `UPDATE user_profiles 
+       SET first_name = $1, 
+           last_name = $2, 
+           pronouns = $3, 
+           birth_date = $4,
+           name = $5,
+           age = $6,
+           updated_at = NOW()
+       WHERE user_id = $7`,
+      [
+        responses.firstName || "",
+        responses.lastName || "",
+        responses.pronouns || "",
+        responses.birthDate || null,
+        `${responses.firstName || ""} ${responses.lastName || ""}`.trim(),
+        responses.birthDate ? Math.floor((new Date() - new Date(responses.birthDate)) / (365.25 * 24 * 60 * 60 * 1000)).toString() : "",
+        req.user.userId
+      ]
+    );
     
     console.log('✅ Questionnaire completed for user:', req.user.username);
-    console.log('   Main goals selected:', cleanedResponses.mainGoals);
+    console.log('   Main goals selected:', responses.mainGoals);
     
-    res.json({ success: true, questionnaire: userData[req.user.userId].questionnaire });
+    res.json({ success: true, message: 'Questionnaire completed successfully' });
   } catch (error) {
     console.error('Questionnaire save error:', error);
     res.status(500).json({ error: 'Failed to save questionnaire' });
@@ -769,20 +1015,43 @@ app.post('/api/questionnaire', authenticateToken, (req, res) => {
 });
 
 // PROFILE ENDPOINTS
-app.get('/api/profile', authenticateToken, (req, res) => {
+app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
-    const userProfile = userData[req.user.userId]?.profile;
-    if (!userProfile) {
+    const profileResult = await pool.query(
+      'SELECT * FROM user_profiles WHERE user_id = $1',
+      [req.user.userId]
+    );
+    
+    if (profileResult.rows.length === 0) {
       return res.status(404).json({ error: 'Profile not found' });
     }
-    res.json(userProfile);
+    
+    const profile = profileResult.rows[0];
+    
+    // Convert database format to app format
+    const profileData = {
+      name: profile.name || "",
+      firstName: profile.first_name || "",
+      lastName: profile.last_name || "",
+      pronouns: profile.pronouns || "",
+      age: profile.age || "",
+      birthDate: profile.birth_date,
+      joinDate: profile.join_date,
+      profileColorHex: profile.profile_color_hex || "#800080",
+      notifications: profile.notifications,
+      biometricAuth: profile.biometric_auth,
+      darkMode: profile.dark_mode,
+      reminderTime: profile.reminder_time
+    };
+    
+    res.json(profileData);
   } catch (error) {
     console.error('Profile load error:', error);
     res.status(500).json({ error: 'Failed to load profile' });
   }
 });
 
-app.post('/api/profile', authenticateToken, (req, res) => {
+app.post('/api/profile', authenticateToken, async (req, res) => {
   try {
     const { 
       name, 
@@ -799,30 +1068,42 @@ app.post('/api/profile', authenticateToken, (req, res) => {
       reminderTime 
     } = req.body;
     
-    if (!userData[req.user.userId]) {
-      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
-    }
-
-    const currentProfile = userData[req.user.userId].profile;
-    
-    userData[req.user.userId].profile = {
-      name: name || currentProfile.name,
-      firstName: firstName || currentProfile.firstName || "",
-      lastName: lastName || currentProfile.lastName || "",
-      pronouns: pronouns || currentProfile.pronouns || "",
-      age: age || currentProfile.age,
-      birthDate: birthDate || currentProfile.birthDate,
-      joinDate: joinDate || currentProfile.joinDate,
-      profileColorHex: profileColorHex || currentProfile.profileColorHex,
-      notifications: notifications !== undefined ? notifications : currentProfile.notifications,
-      biometricAuth: biometricAuth !== undefined ? biometricAuth : currentProfile.biometricAuth,
-      darkMode: darkMode !== undefined ? darkMode : currentProfile.darkMode,
-      reminderTime: reminderTime || currentProfile.reminderTime
-    };
+    await pool.query(
+      `UPDATE user_profiles 
+       SET name = COALESCE($1, name),
+           first_name = COALESCE($2, first_name),
+           last_name = COALESCE($3, last_name),
+           pronouns = COALESCE($4, pronouns),
+           age = COALESCE($5, age),
+           birth_date = COALESCE($6, birth_date),
+           join_date = COALESCE($7, join_date),
+           profile_color_hex = COALESCE($8, profile_color_hex),
+           notifications = COALESCE($9, notifications),
+           biometric_auth = COALESCE($10, biometric_auth),
+           dark_mode = COALESCE($11, dark_mode),
+           reminder_time = COALESCE($12, reminder_time),
+           updated_at = NOW()
+       WHERE user_id = $13`,
+      [
+        name,
+        firstName,
+        lastName, 
+        pronouns,
+        age,
+        birthDate,
+        joinDate,
+        profileColorHex,
+        notifications,
+        biometricAuth,
+        darkMode,
+        reminderTime,
+        req.user.userId
+      ]
+    );
     
     console.log('✅ Profile updated for user:', req.user.username);
     
-    res.json({ success: true, profile: userData[req.user.userId].profile });
+    res.json({ success: true, message: 'Profile updated successfully' });
   } catch (error) {
     console.error('Profile save error:', error);
     res.status(500).json({ error: 'Failed to save profile' });
@@ -830,18 +1111,21 @@ app.post('/api/profile', authenticateToken, (req, res) => {
 });
 
 // MOOD ENDPOINTS
-app.get('/api/mood', authenticateToken, (req, res) => {
+app.get('/api/mood', authenticateToken, async (req, res) => {
   try {
-    const userMoodEntries = userData[req.user.userId]?.moodEntries || [];
-    const sortedEntries = userMoodEntries.sort((a, b) => new Date(b.date) - new Date(a.date));
-    res.json(sortedEntries);
+    const moodResult = await pool.query(
+      'SELECT id, mood, note, entry_date as date FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC',
+      [req.user.userId]
+    );
+    
+    res.json(moodResult.rows);
   } catch (error) {
     console.error('Mood load error:', error);
     res.status(500).json({ error: 'Failed to load mood entries' });
   }
 });
 
-app.post('/api/mood', authenticateToken, (req, res) => {
+app.post('/api/mood', authenticateToken, async (req, res) => {
   try {
     const { id, mood, note, date } = req.body;
     
@@ -852,20 +1136,23 @@ app.post('/api/mood', authenticateToken, (req, res) => {
     if (mood < 1 || mood > 10) {
       return res.status(400).json({ error: 'Mood must be between 1 and 10' });
     }
-
-    if (!userData[req.user.userId]) {
-      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
-    }
     
-    const moodEntry = {
-      id: id || generateUUID(),
-      mood: parseInt(mood),
-      note: note || null,
-      date: date
-    };
+    const moodResult = await pool.query(
+      'INSERT INTO mood_entries (user_id, mood, note, entry_date) VALUES ($1, $2, $3, $4) RETURNING *',
+      [req.user.userId, parseInt(mood), note || null, date]
+    );
     
-    userData[req.user.userId].moodEntries.push(moodEntry);
-    res.json({ success: true, entry: moodEntry });
+    const savedEntry = moodResult.rows[0];
+    
+    res.json({ 
+      success: true, 
+      entry: {
+        id: savedEntry.id,
+        mood: savedEntry.mood,
+        note: savedEntry.note,
+        date: savedEntry.entry_date
+      }
+    });
   } catch (error) {
     console.error('Mood save error:', error);
     res.status(500).json({ error: 'Failed to save mood entry' });
@@ -873,18 +1160,21 @@ app.post('/api/mood', authenticateToken, (req, res) => {
 });
 
 // JOURNAL ENDPOINTS
-app.get('/api/journal', authenticateToken, (req, res) => {
+app.get('/api/journal', authenticateToken, async (req, res) => {
   try {
-    const userJournalEntries = userData[req.user.userId]?.journalEntries || [];
-    const sortedEntries = userJournalEntries.sort((a, b) => new Date(b.date) - new Date(a.date));
-    res.json(sortedEntries);
+    const journalResult = await pool.query(
+      'SELECT id, content, prompt, entry_date as date FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC',
+      [req.user.userId]
+    );
+    
+    res.json(journalResult.rows);
   } catch (error) {
     console.error('Journal load error:', error);
     res.status(500).json({ error: 'Failed to load journal entries' });
   }
 });
 
-app.post('/api/journal', authenticateToken, (req, res) => {
+app.post('/api/journal', authenticateToken, async (req, res) => {
   try {
     const { id, content, prompt, date } = req.body;
     
@@ -895,30 +1185,72 @@ app.post('/api/journal', authenticateToken, (req, res) => {
     if (content.trim().length === 0) {
       return res.status(400).json({ error: 'Content cannot be empty' });
     }
-
-    if (!userData[req.user.userId]) {
-      userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
-    }
     
-    const journalEntry = {
-      id: id || generateUUID(),
-      content: content.trim(),
-      prompt: prompt || null,
-      date: date
-    };
+    const journalResult = await pool.query(
+      'INSERT INTO journal_entries (user_id, content, prompt, entry_date) VALUES ($1, $2, $3, $4) RETURNING *',
+      [req.user.userId, content.trim(), prompt || null, date]
+    );
     
-    userData[req.user.userId].journalEntries.push(journalEntry);
-    res.json({ success: true, entry: journalEntry });
+    const savedEntry = journalResult.rows[0];
+    
+    res.json({ 
+      success: true, 
+      entry: {
+        id: savedEntry.id,
+        content: savedEntry.content,
+        prompt: savedEntry.prompt,
+        date: savedEntry.entry_date
+      }
+    });
   } catch (error) {
     console.error('Journal save error:', error);
     res.status(500).json({ error: 'Failed to save journal entry' });
   }
 });
 
-// UPDATED: Reset endpoint to include chat sessions
-app.post('/api/reset', authenticateToken, (req, res) => {
+// RESET USER DATA
+app.post('/api/reset', authenticateToken, async (req, res) => {
   try {
-    userData[req.user.userId] = initializeUserData(req.user.userId, req.user.username);
+    // Delete all user data but keep the account
+    await pool.query('DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id = $1)', [req.user.userId]);
+    await pool.query('DELETE FROM chat_sessions WHERE user_id = $1', [req.user.userId]);
+    await pool.query('DELETE FROM mood_entries WHERE user_id = $1', [req.user.userId]);
+    await pool.query('DELETE FROM journal_entries WHERE user_id = $1', [req.user.userId]);
+    
+    // Reset questionnaire
+    await pool.query(
+      `UPDATE questionnaire_responses 
+       SET completed = false, 
+           first_name = '', 
+           last_name = '', 
+           birth_date = NULL, 
+           pronouns = '', 
+           main_goals = '{}', 
+           challenges = '{}', 
+           occupation = '', 
+           support_system = '', 
+           previous_therapy = '', 
+           coping_strategies = '{}', 
+           communication_style = '',
+           completed_at = NULL,
+           updated_at = NOW()
+       WHERE user_id = $1`,
+      [req.user.userId]
+    );
+    
+    // Reset profile
+    await pool.query(
+      `UPDATE user_profiles 
+       SET first_name = '', 
+           last_name = '', 
+           pronouns = '', 
+           age = '', 
+           birth_date = NULL,
+           updated_at = NOW()
+       WHERE user_id = $1`,
+      [req.user.userId]
+    );
+    
     res.json({ success: true, message: 'Your data has been reset' });
   } catch (error) {
     console.error('Reset error:', error);
@@ -926,21 +1258,13 @@ app.post('/api/reset', authenticateToken, (req, res) => {
   }
 });
 
-// UTILITY FUNCTION
-function generateUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0;
-    const v = c == 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-}
-
-// UPDATED HEALTH CHECK
+// HEALTH CHECK
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '2.1.0 - Chat Storage Added',
+    version: '3.0.0 - PostgreSQL Integration',
+    database: 'PostgreSQL',
     endpoints: [
       '/api/auth/*', 
       '/api/questionnaire', 
@@ -953,51 +1277,55 @@ app.get('/health', (req, res) => {
       '/api/journal', 
       '/api/reset'
     ],
-    newFeatures: [
-      'Chat conversations now stored in backend',
-      'Chat session management',
-      'Training data export endpoint',
-      'User context tracking in sessions'
+    features: [
+      'Persistent PostgreSQL storage',
+      'Chat session management with memory',
+      'Complete user data persistence',
+      'Training data export',
+      'No more data loss on restart!'
     ]
   });
 });
 
-// Cleanup expired tokens every hour
-setInterval(() => {
-  const now = new Date();
-  Object.keys(passwordResetTokens).forEach(token => {
-    if (now > passwordResetTokens[token].expires) {
-      delete passwordResetTokens[token];
-      console.log('🧹 Cleaned up expired token:', token);
+// Cleanup expired tokens periodically
+setInterval(async () => {
+  try {
+    const result = await pool.query('DELETE FROM password_reset_tokens WHERE expires_at < NOW()');
+    if (result.rowCount > 0) {
+      console.log(`🧹 Cleaned up ${result.rowCount} expired password reset tokens`);
     }
-  });
+  } catch (error) {
+    console.error('Error cleaning up expired tokens:', error);
+  }
 }, 3600000); // 1 hour
 
 app.listen(PORT, () => {
   console.log(`✅ Luma backend running on port ${PORT}`);
   console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
+  console.log(`🗄️ Database: PostgreSQL with persistent storage`);
   console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing RESEND_API_KEY'}`);
   console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
-  console.log(`\n💬 CHAT STORAGE UPDATES:`);
-  console.log(`   ✅ Chat conversations now stored in backend`);
-  console.log(`   ✅ Session management with context tracking`);
-  console.log(`   ✅ Training data export endpoint added`);
-  console.log(`   ✅ Better conversation continuity`);
-  console.log(`\nNew endpoints:`);
-  console.log(`- GET /api/chat/sessions (authenticated) - List chat sessions`);
-  console.log(`- GET /api/chat/sessions/:id (authenticated) - Get specific session`);
-  console.log(`- GET /api/export/training-data (authenticated) - Export for AI training`);
-  console.log(`\nExisting endpoints:`);
+  console.log(`🔗 Database URL: ${process.env.DATABASE_URL ? '✅ Configured' : '❌ Missing DATABASE_URL'}`);
+  console.log(`\n🎉 POSTGRESQL INTEGRATION:`);
+  console.log(`   ✅ All data now persists permanently`);
+  console.log(`   ✅ No more data loss on server restart`);
+  console.log(`   ✅ Professional database with full SQL access`);
+  console.log(`   ✅ Ready for production scaling`);
+  console.log(`   ✅ Perfect for AI training data collection`);
+  console.log(`\nAvailable endpoints:`);
   console.log(`- POST /api/auth/register`);
   console.log(`- POST /api/auth/login`);
   console.log(`- POST /api/auth/forgot-password`);
   console.log(`- POST /api/auth/reset-password`);
   console.log(`- GET /api/auth/me`);
   console.log(`- POST /api/auth/logout`);
-  console.log(`- POST /api/chat (authenticated) - NOW WITH STORAGE`);
-  console.log(`- GET/POST /api/questionnaire (authenticated)`);
-  console.log(`- GET/POST /api/profile (authenticated)`);
-  console.log(`- GET/POST /api/mood (authenticated)`);
-  console.log(`- GET/POST /api/journal (authenticated)`);
-  console.log(`- POST /api/reset (authenticated)`);
+  console.log(`- POST /api/chat (with persistent storage)`);
+  console.log(`- GET /api/chat/sessions`);
+  console.log(`- GET /api/chat/sessions/:id`);
+  console.log(`- GET /api/export/training-data`);
+  console.log(`- GET/POST /api/questionnaire`);
+  console.log(`- GET/POST /api/profile`);
+  console.log(`- GET/POST /api/mood`);
+  console.log(`- GET/POST /api/journal`);
+  console.log(`- POST /api/reset`);
 });
