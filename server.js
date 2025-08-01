@@ -133,21 +133,11 @@ async function initializeDatabase() {
         biometric_auth BOOLEAN DEFAULT false,
         dark_mode BOOLEAN DEFAULT false,
         reminder_time TIME DEFAULT '19:00:00',
+        data_purposes TEXT[] DEFAULT ARRAY['personalization','app_functionality'],
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
-
-    // Add data_purposes column separately (in case it doesn't exist)
-    try {
-      await pool.query(`
-        ALTER TABLE user_profiles 
-        ADD COLUMN IF NOT EXISTS data_purposes TEXT[] DEFAULT '{"personalization","app_functionality"}'
-      `);
-      console.log('✅ data_purposes column ensured');
-    } catch (alterError) {
-      console.log('⚠️ Could not add data_purposes column:', alterError.message);
-    }
 
     // Password resets table
     await pool.query(`
@@ -162,7 +152,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Questionnaire responses - FIXED: Create without data_purpose initially
+    // Questionnaire responses - FIXED: Create with proper array handling
     await pool.query(`
       CREATE TABLE IF NOT EXISTS questionnaire_responses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -170,8 +160,9 @@ async function initializeDatabase() {
         completed BOOLEAN DEFAULT false,
         first_name VARCHAR(255),
         pronouns VARCHAR(50),
-        main_goals TEXT[],
+        main_goals TEXT[] DEFAULT ARRAY[]::TEXT[],
         communication_style VARCHAR(255),
+        data_purpose VARCHAR(100) DEFAULT 'app_personalization',
         consent_given BOOLEAN DEFAULT false,
         completed_at TIMESTAMP WITH TIME ZONE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -179,18 +170,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Add data_purpose column separately (in case it doesn't exist)
-    try {
-      await pool.query(`
-        ALTER TABLE questionnaire_responses 
-        ADD COLUMN IF NOT EXISTS data_purpose VARCHAR(100) DEFAULT 'app_personalization'
-      `);
-      console.log('✅ questionnaire data_purpose column ensured');
-    } catch (alterError) {
-      console.log('⚠️ Could not add questionnaire data_purpose column:', alterError.message);
-    }
-
-    // Mood entries - FIXED: Create without data_purpose initially
+    // Mood entries
     await pool.query(`
       CREATE TABLE IF NOT EXISTS mood_entries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -198,22 +178,12 @@ async function initializeDatabase() {
         mood INTEGER NOT NULL CHECK (mood >= 1 AND mood <= 10),
         note TEXT,
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
+        data_purpose VARCHAR(100) DEFAULT 'mood_tracking',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
 
-    // Add data_purpose column separately
-    try {
-      await pool.query(`
-        ALTER TABLE mood_entries 
-        ADD COLUMN IF NOT EXISTS data_purpose VARCHAR(100) DEFAULT 'mood_tracking'
-      `);
-      console.log('✅ mood_entries data_purpose column ensured');
-    } catch (alterError) {
-      console.log('⚠️ Could not add mood_entries data_purpose column:', alterError.message);
-    }
-
-    // Journal entries - FIXED: Create without data_purpose initially
+    // Journal entries
     await pool.query(`
       CREATE TABLE IF NOT EXISTS journal_entries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -221,20 +191,10 @@ async function initializeDatabase() {
         content TEXT NOT NULL,
         prompt TEXT,
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
+        data_purpose VARCHAR(100) DEFAULT 'journaling',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
-
-    // Add data_purpose column separately
-    try {
-      await pool.query(`
-        ALTER TABLE journal_entries 
-        ADD COLUMN IF NOT EXISTS data_purpose VARCHAR(100) DEFAULT 'journaling'
-      `);
-      console.log('✅ journal_entries data_purpose column ensured');
-    } catch (alterError) {
-      console.log('⚠️ Could not add journal_entries data_purpose column:', alterError.message);
-    }
 
     // Chat sessions
     await pool.query(`
@@ -295,11 +255,13 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// USER REGISTRATION - ENHANCED DEBUG VERSION
+// FIXED USER REGISTRATION
 app.post('/api/auth/register', async (req, res) => {
   console.log('🚀 Registration request started');
   console.log('📝 Request body:', req.body);
   console.log('📝 Content-Type:', req.headers['content-type']);
+  
+  const client = await pool.connect();
   
   try {
     const { username, email, password } = req.body;
@@ -340,7 +302,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     // Check if user already exists
     console.log('🔍 Checking for existing user...');
-    const existingUser = await pool.query(
+    const existingUser = await client.query(
       'SELECT id, username, email FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
       [username, email]
     );
@@ -348,12 +310,22 @@ app.post('/api/auth/register', async (req, res) => {
     console.log('📊 Existing user check result:', existingUser.rows.length, 'users found');
 
     if (existingUser.rows.length > 0) {
-      console.log('❌ User already exists:', existingUser.rows[0]);
-      return res.status(400).json({ 
-        success: false,
-        error: 'Username or email already exists',
-        message: 'Username or email already exists'
-      });
+      const existing = existingUser.rows[0];
+      console.log('❌ User already exists:', existing);
+      
+      if (existing.username.toLowerCase() === username.toLowerCase()) {
+        return res.status(400).json({ 
+          success: false,
+          error: 'Username already exists',
+          message: 'Username already exists'
+        });
+      } else {
+        return res.status(400).json({ 
+          success: false,
+          error: 'Email already exists',
+          message: 'Email already exists'
+        });
+      }
     }
 
     console.log('✅ No existing user found, proceeding with registration');
@@ -364,14 +336,12 @@ app.post('/api/auth/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, saltRounds);
     console.log('✅ Password hashed successfully');
 
-    // Create user with transaction
+    // Start transaction
     console.log('🗄️ Starting database transaction...');
-    const client = await pool.connect();
+    await client.query('BEGIN');
+    console.log('✅ Transaction started');
     
     try {
-      await client.query('BEGIN');
-      console.log('✅ Transaction started');
-      
       // Create user
       console.log('👤 Creating user record...');
       const userResult = await client.query(
@@ -382,48 +352,25 @@ app.post('/api/auth/register', async (req, res) => {
       const newUser = userResult.rows[0];
       console.log('✅ User created with ID:', newUser.id);
 
-      // Create user profile - FIXED: Remove data_purposes from initial insert
+      // Create user profile with fixed array syntax
       console.log('📋 Creating user profile...');
       const profileResult = await client.query(
-        `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time) 
-         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8) RETURNING id`,
-        [newUser.id, '', '', '#800080', true, false, false, '19:00:00']
+        `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes) 
+         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9) RETURNING id`,
+        [newUser.id, '', '', '#800080', true, false, false, '19:00:00', ['personalization', 'app_functionality']]
       );
       console.log('✅ User profile created with ID:', profileResult.rows[0].id);
 
-      // Update profile with data_purposes separately (in case column doesn't exist yet)
-      try {
-        await client.query(
-          `UPDATE user_profiles SET data_purposes = $1 WHERE user_id = $2`,
-          [['personalization', 'app_functionality'], newUser.id]
-        );
-        console.log('✅ Data purposes updated successfully');
-      } catch (dataPurposesError) {
-        console.log('⚠️ Could not set data_purposes (column may not exist):', dataPurposesError.message);
-        // Continue anyway - this is not critical for registration
-      }
-
-      // Create questionnaire response - FIXED: Use proper PostgreSQL array syntax
+      // Create questionnaire response with fixed array syntax
       console.log('📝 Creating questionnaire record...');
       const questionnaireResult = await client.query(
-        `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, consent_given) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [newUser.id, false, '', '', '{}', '', false]  // FIXED: Use '{}' for empty PostgreSQL array
+        `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [newUser.id, false, '', '', [], '', 'app_personalization', false]
       );
       console.log('✅ Questionnaire record created with ID:', questionnaireResult.rows[0].id);
 
-      // Update questionnaire with data_purpose separately (if column exists)
-      try {
-        await client.query(
-          `UPDATE questionnaire_responses SET data_purpose = $1 WHERE user_id = $2`,
-          ['app_personalization', newUser.id]
-        );
-        console.log('✅ Questionnaire data_purpose updated successfully');
-      } catch (dataPurposeError) {
-        console.log('⚠️ Could not set questionnaire data_purpose (column may not exist):', dataPurposeError.message);
-        // Continue anyway - this is not critical for registration
-      }
-
+      // Commit transaction
       await client.query('COMMIT');
       console.log('✅ Transaction committed successfully');
       
@@ -457,9 +404,6 @@ app.post('/api/auth/register', async (req, res) => {
       await client.query('ROLLBACK');
       console.log('🔄 Transaction rolled back');
       throw transactionError;
-    } finally {
-      client.release();
-      console.log('🔌 Database client released');
     }
 
   } catch (error) {
@@ -473,9 +417,9 @@ app.post('/api/auth/register', async (req, res) => {
     let statusCode = 500;
     
     if (error.code === '23505') { // PostgreSQL unique violation
-      if (error.detail.includes('username')) {
+      if (error.detail && error.detail.includes('username')) {
         errorMessage = 'Username already exists';
-      } else if (error.detail.includes('email')) {
+      } else if (error.detail && error.detail.includes('email')) {
         errorMessage = 'Email already exists';
       } else {
         errorMessage = 'User already exists';
@@ -487,6 +431,12 @@ app.post('/api/auth/register', async (req, res) => {
     } else if (error.code === '23514') { // Check constraint violation
       errorMessage = 'Invalid data provided';
       statusCode = 400;
+    } else if (error.code === '42703') { // Column does not exist
+      errorMessage = 'Database schema error';
+      statusCode = 500;
+    } else if (error.code === '42601') { // Syntax error
+      errorMessage = 'Database query error';
+      statusCode = 500;
     }
     
     res.status(statusCode).json({
@@ -499,6 +449,9 @@ app.post('/api/auth/register', async (req, res) => {
         message: error.message
       } : undefined
     });
+  } finally {
+    client.release();
+    console.log('🔌 Database client released');
   }
 });
 
@@ -861,7 +814,7 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
         ]
       );
 
-      // FIXED: Also update user profile with questionnaire data
+      // Also update user profile with questionnaire data
       console.log('📝 Updating user profile with name:', responses.firstName);
       const profileUpdateResult = await client.query(
         `UPDATE user_profiles 
@@ -897,7 +850,7 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
   }
 });
 
-// FIXED PROFILE ENDPOINTS
+// PROFILE ENDPOINTS
 app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
     console.log('📋 Loading profile for user:', req.user.userId);
@@ -955,10 +908,10 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
       biometricAuth, 
       darkMode, 
       reminderTime,
-      dataPurposes  // This comes from the iOS app as camelCase
+      dataPurposes  
     } = req.body;
     
-    // FIXED: Handle the array properly for PostgreSQL
+    // Handle the array properly for PostgreSQL
     let dataArray = ['personalization', 'app_functionality']; // Default values
     
     if (Array.isArray(dataPurposes)) {
@@ -992,7 +945,7 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
         biometricAuth !== undefined ? biometricAuth : false,
         darkMode !== undefined ? darkMode : false,
         reminderTime || "19:00:00",
-        dataArray,  // Use the properly formatted array
+        dataArray,
         req.user.userId
       ]
     );
@@ -1616,69 +1569,6 @@ app.get('/api/debug/db-test', async (req, res) => {
   }
 });
 
-// Test registration data endpoint
-app.post('/api/debug/test-registration', async (req, res) => {
-  try {
-    console.log('🧪 Testing registration data...');
-    console.log('📝 Request body:', req.body);
-    console.log('📝 Headers:', req.headers);
-    
-    const { username, email, password } = req.body;
-    
-    // Test data validation
-    const validationResults = {
-      username: {
-        provided: !!username,
-        value: username,
-        length: username ? username.length : 0
-      },
-      email: {
-        provided: !!email,
-        value: email,
-        valid: email ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) : false
-      },
-      password: {
-        provided: !!password,
-        length: password ? password.length : 0,
-        valid: password ? password.length >= 6 : false
-      }
-    };
-    
-    // Test database connection
-    const client = await pool.connect();
-    
-    // Check for existing users
-    const existingUser = await pool.query(
-      'SELECT id, username, email FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
-      [username || 'test', email || 'test@test.com']
-    );
-    
-    client.release();
-    
-    res.json({
-      success: true,
-      message: 'Registration test completed',
-      validation: validationResults,
-      database: {
-        connected: true,
-        existingUsers: existingUser.rows.length,
-        existingUserData: existingUser.rows
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ Registration test error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Registration test failed',
-      details: {
-        message: error.message,
-        code: error.code
-      }
-    });
-  }
-});
-
 // DEBUG ENDPOINT: Check users (development only)
 app.get('/api/debug/users', async (req, res) => {
   try {
@@ -1708,13 +1598,14 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '6.1.0 - Fixed Deployment Version',
+    version: '6.2.0 - Fixed Registration Arrays',
     database: 'PostgreSQL',
     openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
     features: {
       passwordReset: 'Available',
       profileFixes: 'Applied',
       dataStructure: 'Fixed',
+      arrayHandling: 'Fixed',
       aiPrompt: 'Enhanced'
     },
     success: true
@@ -1725,7 +1616,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     message: 'Luma Backend API',
-    version: '6.1.0',
+    version: '6.2.0',
     status: 'running',
     endpoints: {
       health: '/health',
@@ -1778,8 +1669,11 @@ const startServer = async () => {
       console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI GPT-4' : 'Fallback responses'}`);
       console.log(`🔥 SERVER IS READY TO HANDLE REQUESTS`);
       console.log(`\n🎉 FEATURES INCLUDED:`);
+      console.log(`   ✅ FIXED: PostgreSQL array handling for registration`);
+      console.log(`   ✅ Enhanced transaction management with proper rollback`);
+      console.log(`   ✅ Improved error handling with specific PostgreSQL error codes`);
+      console.log(`   ✅ Fixed database schema initialization with proper data types`);
       console.log(`   ✅ Enhanced AI therapist prompt with evidence-based techniques`);
-      console.log(`   ✅ Fixed profile name saving in questionnaire and profile updates`);
       console.log(`   ✅ Complete password reset functionality with secure tokens`);
       console.log(`   ✅ Intelligent fallback responses when OpenAI is unavailable`);
       console.log(`   ✅ Personalized responses using user's name and context`);
