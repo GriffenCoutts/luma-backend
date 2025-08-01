@@ -39,7 +39,30 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use(express.json());
+
+// ENHANCED JSON PARSING WITH BETTER ERROR HANDLING
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf, encoding) => {
+    try {
+      JSON.parse(buf);
+    } catch (err) {
+      console.error('❌ JSON Parse Error:', err.message);
+      console.error('❌ Raw body:', buf.toString());
+      throw new Error('Invalid JSON in request body');
+    }
+  }
+}));
+
+// Log all request bodies for debugging
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.body) {
+    console.log('📥 Request Body Type:', typeof req.body);
+    console.log('📥 Request Body:', JSON.stringify(req.body, null, 2));
+  }
+  next();
+});
+
 app.options('*', cors(corsOptions));
 
 // Headers middleware
@@ -380,12 +403,12 @@ app.post('/api/auth/register', async (req, res) => {
         // Continue anyway - this is not critical for registration
       }
 
-      // Create questionnaire response - FIXED: Remove data_purpose from initial insert
+      // Create questionnaire response - FIXED: Use proper PostgreSQL array syntax
       console.log('📝 Creating questionnaire record...');
       const questionnaireResult = await client.query(
         `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, consent_given) 
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [newUser.id, false, '', '', [], '', false]
+        [newUser.id, false, '', '', '{}', '', false]  // FIXED: Use '{}' for empty PostgreSQL array
       );
       console.log('✅ Questionnaire record created with ID:', questionnaireResult.rows[0].id);
 
