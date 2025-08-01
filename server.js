@@ -116,7 +116,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Password resets table (NEW)
+    // Password resets table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS password_resets (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -990,7 +990,24 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
   }
 });
 
+// ENHANCED CHAT ENDPOINT WITH PROPER LUMA AI PROMPT
+app.post('/api/chat', authenticateToken, async (req, res) => {
+  try {
+    const { message, chatHistory, sessionId, consentedToAI, userContext } = req.body;
+    
+    // Check AI processing consent
+    if (!consentedToAI) {
+      return res.status(403).json({ 
+        success: false,
+        error: 'AI processing consent required',
+        message: 'AI processing consent required',
+        requiresConsent: true 
+      });
+    }
 
+    let currentSession = null;
+
+    if (sessionId) {
       const sessionResult = await pool.query(
         'SELECT * FROM chat_sessions WHERE id = $1 AND user_id = $2',
         [sessionId, req.user.userId]
@@ -1019,25 +1036,28 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
       [currentSession.id, 'user', message, containsSensitive]
     );
 
-    // Get user profile for personalization
-    const profileResult = await pool.query(
-      'SELECT first_name, pronouns FROM user_profiles WHERE user_id = $1',
-      [req.user.userId]
-    );
+    // Get comprehensive user data for AI context
+    const [profileResult, moodResult, journalResult, questionnaireResult] = await Promise.all([
+      pool.query('SELECT first_name, pronouns FROM user_profiles WHERE user_id = $1', [req.user.userId]),
+      pool.query('SELECT mood, note, entry_date FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 7', [req.user.userId]),
+      pool.query('SELECT content, prompt, entry_date FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 3', [req.user.userId]),
+      pool.query('SELECT completed, main_goals, communication_style FROM questionnaire_responses WHERE user_id = $1', [req.user.userId])
+    ]);
 
     const userProfile = profileResult.rows[0] || {};
-    
-    // Build context for AI
-    let contextString = '';
-    if (userProfile.first_name) {
-      contextString += `The user's name is ${userProfile.first_name}. `;
-    }
-    if (userProfile.pronouns) {
-      contextString += `Their pronouns are ${userProfile.pronouns}. `;
-    }
-    if (userContext) {
-      contextString += `Additional context: ${userContext} `;
-    }
+    const recentMoods = moodResult.rows;
+    const recentJournals = journalResult.rows;
+    const questionnaire = questionnaireResult.rows[0] || {};
+
+    // Generate enhanced AI prompt with user context
+    const systemPrompt = generateEnhancedAIPrompt({
+      userProfile,
+      recentMoods,
+      recentJournals,
+      questionnaire,
+      userContext,
+      containsSensitive
+    });
 
     // Get recent conversation history
     const recentMessages = await pool.query(
@@ -1049,30 +1069,7 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
     const messages = [
       {
         role: 'system',
-        content: `You are Luma, a compassionate AI therapist and wellness companion focused on mental health and emotional wellbeing. You provide thoughtful, empathetic responses that help users process their emotions and develop healthy coping strategies.
-
-Your expertise includes:
-- Evidence-based therapy techniques (CBT, DBT, mindfulness)
-- Mental health support and emotional processing  
-- Stress management and anxiety reduction techniques
-- Healthy coping strategies and self-care practices
-- Building emotional resilience and self-awareness
-- Practical advice for daily mental wellness
-- Recognizing when professional help may be needed
-
-Your approach:
-- Provide warm, non-judgmental support
-- Use evidence-based therapeutic techniques
-- Offer practical, actionable advice
-- Help users identify patterns in their thoughts and emotions
-- Encourage healthy habits and self-reflection
-- Always emphasize that you're a supportive tool, not a replacement for professional therapy when serious issues arise
-
-Be warm, genuine, and focus on evidence-based mental health practices. Keep responses helpful, engaging, and grounded in psychological wellness principles.
-
-${contextString ? `User context: ${contextString}` : ''}
-
-Remember to be conversational and supportive, not clinical. Focus on understanding their experience first, then gently guide them toward insights and healthy coping strategies.`
+        content: systemPrompt
       }
     ];
 
@@ -1131,8 +1128,8 @@ Remember to be conversational and supportive, not clinical. Focus on understandi
         }
       } catch (openaiError) {
         console.error('OpenAI API error:', openaiError);
-        // Fallback to simple response
-        const fallbackResponse = generateFallbackResponse(message, userProfile);
+        // Fallback to enhanced response
+        const fallbackResponse = generateEnhancedFallbackResponse(message, userProfile, recentMoods, recentJournals);
         
         await pool.query(
           'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
@@ -1146,8 +1143,8 @@ Remember to be conversational and supportive, not clinical. Focus on understandi
         });
       }
     } else {
-      // No OpenAI API key - use fallback
-      const fallbackResponse = generateFallbackResponse(message, userProfile);
+      // No OpenAI API key - use enhanced fallback
+      const fallbackResponse = generateEnhancedFallbackResponse(message, userProfile, recentMoods, recentJournals);
       
       await pool.query(
         'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
@@ -1171,7 +1168,7 @@ Remember to be conversational and supportive, not clinical. Focus on understandi
   }
 });
 
-// ENHANCED AI PROMPT GENERATION FUNCTIONS
+// AI PROMPT GENERATION FUNCTIONS
 function generateEnhancedAIPrompt({ userProfile, recentMoods, recentJournals, questionnaire, userContext, containsSensitive }) {
   let prompt = `You are Luma, a compassionate AI therapist and wellness companion focused on mental health and emotional wellbeing. You provide thoughtful, empathetic responses that help users process their emotions and develop healthy coping strategies.
 
@@ -1302,40 +1299,6 @@ Remember: You're having a conversation with a real person who has trusted you wi
   return prompt;
 }
 
-function generateContextualPrompt({ userProfile, recentMoods, recentJournals, context, promptType }) {
-  let prompt = '';
-
-  switch (promptType) {
-    case 'mood_check':
-      prompt = `Generate a thoughtful mood check-in response for ${userProfile.first_name || 'the user'}. `;
-      if (recentMoods.length > 0) {
-        const lastMood = recentMoods[0];
-        prompt += `Their last recorded mood was ${lastMood.mood}/10. `;
-      }
-      break;
-      
-    case 'journal_reflection':
-      prompt = `Help ${userProfile.first_name || 'the user'} reflect on their recent journaling. `;
-      if (recentJournals.length > 0) {
-        prompt += `Recent themes include: ${extractJournalThemes(recentJournals[0].content).join(', ')}. `;
-      }
-      break;
-      
-    case 'crisis_support':
-      prompt = `Provide crisis support and resources. Be empathetic but directive about seeking professional help. `;
-      break;
-      
-    default:
-      prompt = `Provide supportive mental health guidance for ${userProfile.first_name || 'the user'}. `;
-  }
-
-  if (context) {
-    prompt += `Context: ${context}`;
-  }
-
-  return prompt;
-}
-
 function analyzeMoodTrend(moods) {
   if (moods.length < 2) return 'insufficient data';
   
@@ -1455,33 +1418,6 @@ Sometimes it helps to reflect on what's working well so we can recognize and bui
 Sometimes just talking through our thoughts and feelings can provide clarity and relief. Can you tell me more about what you're experiencing right now? I'm here to help you work through whatever you're facing.`;
 }
 
-// Fallback response generator when OpenAI is not available (keeping original simple version for basic fallback)
-function generateFallbackResponse(message, userProfile) {
-  const name = userProfile.first_name || '';
-  const greeting = name ? `${name}, ` : '';
-  
-  const lowerMessage = message.toLowerCase();
-  
-  if (lowerMessage.includes('anxious') || lowerMessage.includes('anxiety')) {
-    return `${greeting}I hear that you're feeling anxious. That's completely understandable - anxiety is something many people experience. One technique that can help in the moment is the 4-7-8 breathing method: breathe in for 4 counts, hold for 7, and exhale for 8. This activates your body's relaxation response. Can you tell me more about what's making you feel anxious right now?`;
-  }
-  
-  if (lowerMessage.includes('sad') || lowerMessage.includes('depressed') || lowerMessage.includes('down')) {
-    return `${greeting}I'm sorry you're feeling this way. Your feelings are valid, and it's important that you're reaching out. Sometimes when we're feeling low, small actions can help - even something as simple as stepping outside for a few minutes or reaching out to someone you care about. What's been on your mind lately that might be contributing to these feelings?`;
-  }
-  
-  if (lowerMessage.includes('stress') || lowerMessage.includes('overwhelmed')) {
-    return `${greeting}Feeling stressed or overwhelmed is really challenging. When we're in that state, it can help to break things down into smaller, manageable pieces. One approach is to identify what you can control versus what you can't - focusing your energy on the things within your influence. What's the biggest source of stress for you right now?`;
-  }
-  
-  if (lowerMessage.includes('sleep') || lowerMessage.includes('tired') || lowerMessage.includes('insomnia')) {
-    return `${greeting}Sleep issues can really impact how we feel overall. Good sleep hygiene can make a big difference - things like keeping a consistent bedtime, avoiding screens before bed, and creating a calming bedtime routine. How long have you been having trouble with sleep?`;
-  }
-  
-  // General supportive response
-  return `${greeting}Thank you for sharing that with me. I'm here to listen and support you. It sounds like you have something important on your mind. Sometimes just talking through our thoughts and feelings can provide clarity and relief. Can you tell me more about what you're experiencing right now?`;
-}
-
 // DEBUG ENDPOINT: Check users (development only)
 app.get('/api/debug/users', async (req, res) => {
   try {
@@ -1511,15 +1447,33 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '6.0.0 - Complete Profile & Password Reset Fixes',
+    version: '6.1.0 - Fixed Deployment Version',
     database: 'PostgreSQL',
     openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
     features: {
       passwordReset: 'Available',
       profileFixes: 'Applied',
-      dataStructure: 'Fixed'
+      dataStructure: 'Fixed',
+      aiPrompt: 'Enhanced'
     },
     success: true
+  });
+});
+
+// Basic route for root
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Luma Backend API',
+    version: '6.1.0',
+    status: 'running',
+    endpoints: {
+      health: '/health',
+      auth: '/api/auth/*',
+      profile: '/api/profile',
+      mood: '/api/mood',
+      journal: '/api/journal',
+      chat: '/api/chat'
+    }
   });
 });
 
@@ -1562,12 +1516,14 @@ const startServer = async () => {
       console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
       console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI GPT-4' : 'Fallback responses'}`);
       console.log(`🔥 SERVER IS READY TO HANDLE REQUESTS`);
-      console.log(`\n🎉 NEW FEATURES:`);
-      console.log(`   ✅ Fixed profile name saving (data_purposes array handling)`);
-      console.log(`   ✅ Added complete password reset functionality`);
-      console.log(`   ✅ Fixed database column mismatch issues`);
-      console.log(`   ✅ Enhanced error logging and debugging`);
-      console.log(`   ✅ Added password_resets table for secure token management`);
+      console.log(`\n🎉 FEATURES INCLUDED:`);
+      console.log(`   ✅ Enhanced AI therapist prompt with evidence-based techniques`);
+      console.log(`   ✅ Fixed profile name saving in questionnaire and profile updates`);
+      console.log(`   ✅ Complete password reset functionality with secure tokens`);
+      console.log(`   ✅ Intelligent fallback responses when OpenAI is unavailable`);
+      console.log(`   ✅ Personalized responses using user's name and context`);
+      console.log(`   ✅ Mood trend analysis and journal theme extraction`);
+      console.log(`   ✅ PIPEDA-compliant privacy features`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
