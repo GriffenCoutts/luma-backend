@@ -656,8 +656,11 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
       biometricAuth, 
       darkMode, 
       reminderTime,
-      dataPurposes
+      dataPurposes  // This comes from the iOS app
     } = req.body;
+    
+    // FIXED: Handle the array properly for PostgreSQL
+    const dataArray = Array.isArray(dataPurposes) ? dataPurposes : ['personalization', 'app_functionality'];
     
     const updateResult = await pool.query(
       `UPDATE user_profiles 
@@ -672,7 +675,7 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
            data_purposes = $9,
            updated_at = NOW()
        WHERE user_id = $10
-       RETURNING first_name, pronouns`,
+       RETURNING first_name, pronouns, data_purposes`,
       [
         firstName || "",
         pronouns || "",
@@ -682,7 +685,7 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
         biometricAuth !== undefined ? biometricAuth : false,
         darkMode !== undefined ? darkMode : false,
         reminderTime || "19:00:00",
-        dataPurposes || [],
+        dataArray,  // Use the properly formatted array
         req.user.userId
       ]
     );
@@ -694,11 +697,14 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
       message: 'Profile updated successfully' 
     });
   } catch (error) {
-    console.error('Profile save error:', error);
+    console.error('💥 Profile save error:', error);
+    console.error('💥 Error details:', error.message);
+    console.error('💥 Error code:', error.code);
     res.status(500).json({ 
       success: false,
       error: 'Failed to save profile',
-      message: 'Failed to save profile'
+      message: 'Failed to save profile',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
