@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const { Resend } = require('resend');
 require('dotenv').config();
 
 const app = express();
@@ -86,6 +87,9 @@ app.use((req, res, next) => {
 
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this';
+
+// Initialize Resend for email sending
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // PostgreSQL Connection
 const pool = new Pool({
@@ -264,6 +268,73 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
+
+// Email sending function using Resend
+async function sendPasswordResetEmail(email, resetToken, username) {
+  try {
+    const resetLink = `luma://reset-password?token=${resetToken}`; // Deep link for your iOS app
+    
+    const { data, error } = await resend.emails.send({
+      from: 'Luma <onboard@resend.dev>', // Using Resend's test domain
+      to: [email],
+      subject: 'Reset Your Luma Password',
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="text-align: center; margin-bottom: 40px;">
+            <div style="width: 60px; height: 60px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 20px;">
+              <span style="color: white; font-size: 24px; font-weight: bold;">L</span>
+            </div>
+            <h1 style="color: #333; margin: 0; font-size: 24px;">Reset Your Password</h1>
+          </div>
+          
+          <p style="color: #555; font-size: 16px; line-height: 1.5;">
+            Hi ${username},
+          </p>
+          
+          <p style="color: #555; font-size: 16px; line-height: 1.5;">
+            You requested a password reset for your Luma account. Tap the button below to create a new password:
+          </p>
+          
+          <div style="text-align: center; margin: 40px 0;">
+            <a href="${resetLink}" 
+               style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 32px; text-decoration: none; border-radius: 12px; display: inline-block; font-weight: 600; font-size: 16px;">
+              Reset Password
+            </a>
+          </div>
+          
+          <p style="color: #777; font-size: 14px; line-height: 1.5;">
+            Or copy and paste this code in the app: <code style="background: #f5f5f5; padding: 4px 8px; border-radius: 4px; font-family: monospace;">${resetToken}</code>
+          </p>
+          
+          <div style="background: #f8f9fa; border-radius: 8px; padding: 20px; margin: 30px 0;">
+            <p style="color: #666; font-size: 14px; margin: 0; line-height: 1.5;">
+              <strong>Security Note:</strong> This reset link will expire in 1 hour. If you didn't request this password reset, you can safely ignore this email.
+            </p>
+          </div>
+          
+          <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+          
+          <div style="text-align: center;">
+            <p style="color: #999; font-size: 12px; margin: 0;">
+              This email was sent by Luma - Your AI Mental Health Companion
+            </p>
+          </div>
+        </div>
+      `
+    });
+
+    if (error) {
+      console.error(`❌ Resend email error for ${email}:`, error);
+      return false;
+    }
+
+    console.log(`✅ Password reset email sent to ${email} (ID: ${data.id})`);
+    return true;
+  } catch (error) {
+    console.error(`❌ Failed to send password reset email to ${email}:`, error);
+    return false;
+  }
+}
 
 // FIXED USER REGISTRATION
 app.post('/api/auth/register', async (req, res) => {
@@ -572,7 +643,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     );
     
     if (userResult.rows.length === 0) {
-      // Don't reveal if email exists or not for security
+      // Still return success for security (don't reveal if email exists)
       return res.json({
         success: true,
         message: 'If an account with that email exists, we\'ve sent password reset instructions.'
@@ -596,21 +667,41 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     
     console.log(`🔑 Reset token generated for ${email}: ${resetToken}`);
     
-    // In production, send email here
-    // For development, we'll include the token in the response (REMOVE IN PRODUCTION!)
-    res.json({
-      success: true,
-      message: 'If an account with that email exists, we\'ve sent password reset instructions.',
-      // DEVELOPMENT ONLY - Remove this in production!
-      developmentToken: process.env.NODE_ENV === 'development' ? resetToken : undefined
-    });
+    // Send email if Resend API key is configured
+    if (process.env.RESEND_API_KEY) {
+      const emailSent = await sendPasswordResetEmail(email, resetToken, user.username || 'User');
+      
+      if (emailSent) {
+        res.json({
+          success: true,
+          message: 'Password reset instructions have been sent to your email address.'
+        });
+      } else {
+        // Still return success but log the error internally
+        console.error('Email sending failed, but user will see success message');
+        res.json({
+          success: true,
+          message: 'If an account with that email exists, we\'ve sent password reset instructions.',
+          // Include token in development mode as fallback
+          ...(process.env.NODE_ENV !== 'production' && { developmentToken: resetToken })
+        });
+      }
+    } else {
+      // No email service configured - development mode
+      console.log('⚠️ No RESEND_API_KEY configured, returning token for development');
+      res.json({
+        success: true,
+        message: 'If an account with that email exists, we\'ve sent password reset instructions.',
+        developmentToken: resetToken // REMOVE IN PRODUCTION
+      });
+    }
     
   } catch (error) {
     console.error('Password reset request error:', error);
     res.status(500).json({
       success: false,
       error: 'Server error',
-      message: 'Server error'
+      message: 'Server error occurred. Please try again.'
     });
   }
 });
@@ -1608,7 +1699,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '6.2.0 - Fixed Registration Arrays',
+    version: '6.3.0 - Added Resend Email Integration',
     database: 'PostgreSQL',
     openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
     features: {
@@ -1626,7 +1717,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     message: 'Luma Backend API',
-    version: '6.2.0',
+    version: '6.3.0',
     status: 'running',
     endpoints: {
       health: '/health',
@@ -1683,6 +1774,7 @@ const startServer = async () => {
       console.log(`   ✅ Enhanced transaction management with proper rollback`);
       console.log(`   ✅ Improved error handling with specific PostgreSQL error codes`);
       console.log(`   ✅ Fixed database schema initialization with proper data types`);
+      console.log(`   ✅ Added Resend email integration for password resets`);
       console.log(`   ✅ Enhanced AI therapist prompt with evidence-based techniques`);
       console.log(`   ✅ Complete password reset functionality with secure tokens`);
       console.log(`   ✅ Intelligent fallback responses when OpenAI is unavailable`);
