@@ -97,7 +97,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // User profiles
+    // User profiles - FIXED: Ensure data_purposes column is created properly
     await pool.query(`
       CREATE TABLE IF NOT EXISTS user_profiles (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -110,11 +110,21 @@ async function initializeDatabase() {
         biometric_auth BOOLEAN DEFAULT false,
         dark_mode BOOLEAN DEFAULT false,
         reminder_time TIME DEFAULT '19:00:00',
-        data_purposes TEXT[] DEFAULT '{"personalization","app_functionality"}',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
+
+    // Add data_purposes column separately (in case it doesn't exist)
+    try {
+      await pool.query(`
+        ALTER TABLE user_profiles 
+        ADD COLUMN IF NOT EXISTS data_purposes TEXT[] DEFAULT '{"personalization","app_functionality"}'
+      `);
+      console.log('✅ data_purposes column ensured');
+    } catch (alterError) {
+      console.log('⚠️ Could not add data_purposes column:', alterError.message);
+    }
 
     // Password resets table
     await pool.query(`
@@ -232,23 +242,30 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// USER REGISTRATION
+// USER REGISTRATION - ENHANCED DEBUG VERSION
 app.post('/api/auth/register', async (req, res) => {
   console.log('🚀 Registration request started');
+  console.log('📝 Request body:', req.body);
+  console.log('📝 Content-Type:', req.headers['content-type']);
   
   try {
     const { username, email, password } = req.body;
+    
+    console.log('📝 Extracted values:', { username, email, passwordLength: password?.length });
 
-    // Input validation
+    // Input validation with detailed logging
     if (!username || !email || !password) {
+      console.log('❌ Missing required fields:', { username: !!username, email: !!email, password: !!password });
       return res.status(400).json({ 
         success: false,
         error: 'Username, email, and password are required',
-        message: 'Username, email, and password are required'
+        message: 'Username, email, and password are required',
+        debug: { username: !!username, email: !!email, password: !!password }
       });
     }
 
     if (password.length < 6) {
+      console.log('❌ Password too short:', password.length);
       return res.status(400).json({ 
         success: false,
         error: 'Password must be at least 6 characters',
@@ -258,6 +275,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
+      console.log('❌ Invalid email format:', email);
       return res.status(400).json({ 
         success: false,
         error: 'Please enter a valid email address',
@@ -265,13 +283,19 @@ app.post('/api/auth/register', async (req, res) => {
       });
     }
 
+    console.log('✅ Input validation passed');
+
     // Check if user already exists
+    console.log('🔍 Checking for existing user...');
     const existingUser = await pool.query(
-      'SELECT id FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
+      'SELECT id, username, email FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
       [username, email]
     );
 
+    console.log('📊 Existing user check result:', existingUser.rows.length, 'users found');
+
     if (existingUser.rows.length > 0) {
+      console.log('❌ User already exists:', existingUser.rows[0]);
       return res.status(400).json({ 
         success: false,
         error: 'Username or email already exists',
@@ -279,46 +303,73 @@ app.post('/api/auth/register', async (req, res) => {
       });
     }
 
+    console.log('✅ No existing user found, proceeding with registration');
+
     // Hash password
+    console.log('🔐 Hashing password...');
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
+    console.log('✅ Password hashed successfully');
 
     // Create user with transaction
+    console.log('🗄️ Starting database transaction...');
     const client = await pool.connect();
     
     try {
       await client.query('BEGIN');
+      console.log('✅ Transaction started');
       
       // Create user
+      console.log('👤 Creating user record...');
       const userResult = await client.query(
         'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, created_at',
         [username, email, hashedPassword]
       );
 
       const newUser = userResult.rows[0];
+      console.log('✅ User created with ID:', newUser.id);
 
-      // Create user profile
-      await client.query(
-        `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes) 
-         VALUES ($1, '', '', NOW(), '#800080', true, false, false, '19:00:00', '{"personalization","app_functionality"}')`,
-        [newUser.id]
+      // Create user profile - FIXED: Remove data_purposes from initial insert
+      console.log('📋 Creating user profile...');
+      const profileResult = await client.query(
+        `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time) 
+         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8) RETURNING id`,
+        [newUser.id, '', '', '#800080', true, false, false, '19:00:00']
       );
+      console.log('✅ User profile created with ID:', profileResult.rows[0].id);
+
+      // Update profile with data_purposes separately (in case column doesn't exist yet)
+      try {
+        await client.query(
+          `UPDATE user_profiles SET data_purposes = $1 WHERE user_id = $2`,
+          [['personalization', 'app_functionality'], newUser.id]
+        );
+        console.log('✅ Data purposes updated successfully');
+      } catch (dataPurposesError) {
+        console.log('⚠️ Could not set data_purposes (column may not exist):', dataPurposesError.message);
+        // Continue anyway - this is not critical for registration
+      }
 
       // Create questionnaire response
-      await client.query(
+      console.log('📝 Creating questionnaire record...');
+      const questionnaireResult = await client.query(
         `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given) 
-         VALUES ($1, false, '', '', '{}', '', 'app_personalization', false)`,
-        [newUser.id]
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [newUser.id, false, '', '', [], '', 'app_personalization', false]
       );
+      console.log('✅ Questionnaire record created with ID:', questionnaireResult.rows[0].id);
 
       await client.query('COMMIT');
+      console.log('✅ Transaction committed successfully');
       
       // Generate JWT token
+      console.log('🔑 Generating JWT token...');
       const token = jwt.sign(
         { userId: newUser.id, username: newUser.username },
         JWT_SECRET,
         { expiresIn: '7d' }
       );
+      console.log('✅ JWT token generated');
 
       console.log('🎉 Registration completed successfully for:', newUser.username);
 
@@ -333,20 +384,55 @@ app.post('/api/auth/register', async (req, res) => {
         }
       });
 
-    } catch (error) {
+    } catch (transactionError) {
+      console.log('💥 Transaction error occurred:', transactionError.message);
+      console.log('💥 Error code:', transactionError.code);
+      console.log('💥 Error detail:', transactionError.detail);
+      
       await client.query('ROLLBACK');
-      throw error;
+      console.log('🔄 Transaction rolled back');
+      throw transactionError;
     } finally {
       client.release();
+      console.log('🔌 Database client released');
     }
 
   } catch (error) {
-    console.error('💥 REGISTRATION ERROR:', error);
+    console.error('💥 REGISTRATION ERROR:', error.message);
+    console.error('💥 Error stack:', error.stack);
+    console.error('💥 Error code:', error.code);
+    console.error('💥 Error detail:', error.detail);
     
-    res.status(500).json({
+    // Provide more specific error messages
+    let errorMessage = 'Server error during registration';
+    let statusCode = 500;
+    
+    if (error.code === '23505') { // PostgreSQL unique violation
+      if (error.detail.includes('username')) {
+        errorMessage = 'Username already exists';
+      } else if (error.detail.includes('email')) {
+        errorMessage = 'Email already exists';
+      } else {
+        errorMessage = 'User already exists';
+      }
+      statusCode = 400;
+    } else if (error.code === '23503') { // Foreign key violation
+      errorMessage = 'Database constraint error';
+      statusCode = 400;
+    } else if (error.code === '23514') { // Check constraint violation
+      errorMessage = 'Invalid data provided';
+      statusCode = 400;
+    }
+    
+    res.status(statusCode).json({
       success: false,
-      error: 'Server error during registration',
-      message: 'Server error during registration'
+      error: errorMessage,
+      message: errorMessage,
+      debug: process.env.NODE_ENV === 'development' ? {
+        code: error.code,
+        detail: error.detail,
+        message: error.message
+      } : undefined
     });
   }
 });
@@ -1417,6 +1503,116 @@ Sometimes it helps to reflect on what's working well so we can recognize and bui
 
 Sometimes just talking through our thoughts and feelings can provide clarity and relief. Can you tell me more about what you're experiencing right now? I'm here to help you work through whatever you're facing.`;
 }
+
+// Database connection test endpoint
+app.get('/api/debug/db-test', async (req, res) => {
+  try {
+    console.log('🔍 Testing database connection...');
+    
+    // Test basic connection
+    const client = await pool.connect();
+    console.log('✅ Database connection successful');
+    
+    // Test users table
+    const usersTest = await client.query('SELECT COUNT(*) as count FROM users');
+    console.log('✅ Users table accessible, count:', usersTest.rows[0].count);
+    
+    // Test user_profiles table
+    const profilesTest = await client.query('SELECT COUNT(*) as count FROM user_profiles');
+    console.log('✅ User profiles table accessible, count:', profilesTest.rows[0].count);
+    
+    // Test questionnaire_responses table
+    const questionnaireTest = await client.query('SELECT COUNT(*) as count FROM questionnaire_responses');
+    console.log('✅ Questionnaire responses table accessible, count:', questionnaireTest.rows[0].count);
+    
+    client.release();
+    
+    res.json({
+      success: true,
+      message: 'Database connection and tables working',
+      data: {
+        users: parseInt(usersTest.rows[0].count),
+        profiles: parseInt(profilesTest.rows[0].count),
+        questionnaires: parseInt(questionnaireTest.rows[0].count)
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Database test error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Database test failed',
+      details: {
+        message: error.message,
+        code: error.code,
+        detail: error.detail
+      }
+    });
+  }
+});
+
+// Test registration data endpoint
+app.post('/api/debug/test-registration', async (req, res) => {
+  try {
+    console.log('🧪 Testing registration data...');
+    console.log('📝 Request body:', req.body);
+    console.log('📝 Headers:', req.headers);
+    
+    const { username, email, password } = req.body;
+    
+    // Test data validation
+    const validationResults = {
+      username: {
+        provided: !!username,
+        value: username,
+        length: username ? username.length : 0
+      },
+      email: {
+        provided: !!email,
+        value: email,
+        valid: email ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) : false
+      },
+      password: {
+        provided: !!password,
+        length: password ? password.length : 0,
+        valid: password ? password.length >= 6 : false
+      }
+    };
+    
+    // Test database connection
+    const client = await pool.connect();
+    
+    // Check for existing users
+    const existingUser = await pool.query(
+      'SELECT id, username, email FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
+      [username || 'test', email || 'test@test.com']
+    );
+    
+    client.release();
+    
+    res.json({
+      success: true,
+      message: 'Registration test completed',
+      validation: validationResults,
+      database: {
+        connected: true,
+        existingUsers: existingUser.rows.length,
+        existingUserData: existingUser.rows
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Registration test error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Registration test failed',
+      details: {
+        message: error.message,
+        code: error.code
+      }
+    });
+  }
+});
 
 // DEBUG ENDPOINT: Check users (development only)
 app.get('/api/debug/users', async (req, res) => {
