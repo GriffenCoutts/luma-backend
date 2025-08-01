@@ -67,6 +67,14 @@ async function initializeDatabase() {
         data_purposes TEXT[] DEFAULT '{"personalization","app_functionality"}',
         consent_timestamp TIMESTAMP WITH TIME ZONE,
         data_retention_period INTEGER DEFAULT 365,
+        app_theme VARCHAR(20) DEFAULT 'system',
+        accessibility_features JSONB DEFAULT '{}',
+        language_preference VARCHAR(10) DEFAULT 'en',
+        timezone VARCHAR(50) DEFAULT 'America/Toronto',
+        onboarding_completed_at TIMESTAMP WITH TIME ZONE,
+        last_active_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        app_version VARCHAR(20),
+        device_info JSONB DEFAULT '{}',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
@@ -86,6 +94,10 @@ async function initializeDatabase() {
         version VARCHAR(10) DEFAULT '1.0',
         ip_address INET,
         user_agent TEXT,
+        consent_method VARCHAR(50) DEFAULT 'app_interface',
+        consent_source VARCHAR(100) DEFAULT 'mobile_app',
+        withdrawal_reason TEXT,
+        parent_consent_id UUID REFERENCES user_consents(id),
         consent_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         withdrawn_at TIMESTAMP WITH TIME ZONE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -146,6 +158,10 @@ async function initializeDatabase() {
         role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
         content TEXT NOT NULL,
         contains_sensitive_data BOOLEAN DEFAULT false,
+        content_hash VARCHAR(64),
+        privacy_level VARCHAR(20) DEFAULT 'standard',
+        auto_delete_at TIMESTAMP WITH TIME ZONE,
+        content_classification JSONB DEFAULT '{"containsMedicalTerms": false, "containsPersonalInfo": false, "sensitivityScore": 1}',
         timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
@@ -160,6 +176,11 @@ async function initializeDatabase() {
         note TEXT,
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
         data_purpose VARCHAR(100) DEFAULT 'mood_tracking',
+        mood_category VARCHAR(50),
+        mood_triggers TEXT[],
+        weather_context JSONB,
+        activity_context TEXT,
+        privacy_level VARCHAR(20) DEFAULT 'private',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
@@ -173,6 +194,13 @@ async function initializeDatabase() {
         prompt TEXT,
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
         data_purpose VARCHAR(100) DEFAULT 'journaling',
+        entry_type VARCHAR(50) DEFAULT 'free_write',
+        emotional_tone VARCHAR(50),
+        word_count INTEGER,
+        reading_time_estimate INTEGER,
+        tags TEXT[],
+        privacy_level VARCHAR(20) DEFAULT 'private',
+        auto_delete_at TIMESTAMP WITH TIME ZONE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
@@ -200,6 +228,87 @@ async function initializeDatabase() {
       )
     `);
 
+    // NEW TABLES for enhanced features
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notification_preferences (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        notification_type VARCHAR(50) NOT NULL,
+        enabled BOOLEAN DEFAULT true,
+        frequency VARCHAR(20) DEFAULT 'daily',
+        time_of_day TIME DEFAULT '19:00:00',
+        days_of_week INTEGER[] DEFAULT '{1,2,3,4,5,6,7}',
+        sound_enabled BOOLEAN DEFAULT true,
+        vibration_enabled BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        UNIQUE(user_id, notification_type)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        session_token VARCHAR(255) UNIQUE,
+        device_id VARCHAR(255),
+        device_type VARCHAR(50),
+        app_version VARCHAR(20),
+        os_version VARCHAR(50),
+        ip_address INET,
+        user_agent TEXT,
+        login_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        last_activity_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        logout_at TIMESTAMP WITH TIME ZONE,
+        session_duration_seconds INTEGER,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS privacy_settings (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        setting_name VARCHAR(100) NOT NULL,
+        setting_value JSONB NOT NULL,
+        data_type VARCHAR(50),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        UNIQUE(user_id, setting_name)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_app_preferences (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        preference_key VARCHAR(100) NOT NULL,
+        preference_value JSONB NOT NULL,
+        preference_type VARCHAR(50),
+        sync_across_devices BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        UNIQUE(user_id, preference_key)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS consent_audit_trail (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        consent_id UUID REFERENCES user_consents(id) ON DELETE CASCADE,
+        action VARCHAR(50) NOT NULL,
+        consent_type VARCHAR(50) NOT NULL,
+        old_value BOOLEAN,
+        new_value BOOLEAN,
+        reason TEXT,
+        ip_address INET,
+        user_agent TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
     // Create indexes for better performance
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
@@ -218,6 +327,11 @@ async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_journal_entries_date ON journal_entries(entry_date);
       CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires ON password_reset_tokens(expires_at);
       CREATE INDEX IF NOT EXISTS idx_data_deletion_requests_user_id ON data_deletion_requests(user_id);
+      CREATE INDEX IF NOT EXISTS idx_notification_preferences_user_id ON notification_preferences(user_id);
+      CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_privacy_settings_user_id ON privacy_settings(user_id);
+      CREATE INDEX IF NOT EXISTS idx_user_app_preferences_user_id ON user_app_preferences(user_id);
+      CREATE INDEX IF NOT EXISTS idx_consent_audit_trail_user_id ON consent_audit_trail(user_id);
     `);
 
     console.log('✅ PIPEDA-compliant database tables initialized successfully');
@@ -345,6 +459,27 @@ app.post('/api/auth/register', async (req, res) => {
       [newUser.id]
     );
 
+    // Create default notification preferences
+    const defaultNotifications = [
+      { type: 'mood_reminder', enabled: true },
+      { type: 'journal_reminder', enabled: true },
+      { type: 'weekly_summary', enabled: false }
+    ];
+
+    for (const notif of defaultNotifications) {
+      await pool.query(
+        'INSERT INTO notification_preferences (user_id, notification_type, enabled) VALUES ($1, $2, $3)',
+        [newUser.id, notif.type, notif.enabled]
+      );
+    }
+
+    // Create default privacy settings
+    await pool.query(
+      `INSERT INTO privacy_settings (user_id, setting_name, setting_value, data_type) 
+       VALUES ($1, 'data_sharing_external', '{"enabled": false, "partners": []}', 'boolean')`,
+      [newUser.id]
+    );
+
     // Generate JWT token
     const token = jwt.sign(
       { userId: newUser.id, username: newUser.username },
@@ -399,6 +534,12 @@ app.post('/api/auth/login', async (req, res) => {
     // PIPEDA: Check data retention on login
     await checkDataRetention(user.id);
 
+    // Update last active timestamp
+    await pool.query(
+      'UPDATE user_profiles SET last_active_at = NOW() WHERE user_id = $1',
+      [user.id]
+    );
+
     // Generate JWT token
     const token = jwt.sign(
       { userId: user.id, username: user.username },
@@ -437,9 +578,9 @@ app.post('/api/consent', authenticateToken, async (req, res) => {
     } = req.body;
 
     // Insert new consent record
-    await pool.query(
+    const consentResult = await pool.query(
       `INSERT INTO user_consents (user_id, data_collection, ai_processing, mood_tracking, journaling, notifications, data_sharing, version, ip_address, user_agent)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
       [
         req.user.userId,
         dataCollection,
@@ -453,6 +594,24 @@ app.post('/api/consent', authenticateToken, async (req, res) => {
         req.get('User-Agent')
       ]
     );
+
+    // Log consent changes in audit trail
+    const consentId = consentResult.rows[0].id;
+    const consentTypes = [
+      { type: 'data_collection', value: dataCollection },
+      { type: 'ai_processing', value: aiProcessing },
+      { type: 'mood_tracking', value: moodTracking },
+      { type: 'journaling', value: journaling },
+      { type: 'notifications', value: notifications },
+      { type: 'data_sharing', value: dataSharing }
+    ];
+
+    for (const consent of consentTypes) {
+      await pool.query(
+        'INSERT INTO consent_audit_trail (user_id, consent_id, action, consent_type, new_value, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [req.user.userId, consentId, 'granted', consent.type, consent.value, req.ip, req.get('User-Agent')]
+      );
+    }
 
     // Update profile consent timestamp
     await pool.query(
@@ -504,6 +663,163 @@ app.get('/api/consent/status', authenticateToken, async (req, res) => {
   }
 });
 
+// NOTIFICATION PREFERENCES ENDPOINTS
+app.get('/api/notifications/preferences', authenticateToken, async (req, res) => {
+  try {
+    await logDataAccess(req.user.userId, 'read', 'notification_preferences', req);
+
+    const preferencesResult = await pool.query(
+      'SELECT * FROM notification_preferences WHERE user_id = $1 ORDER BY notification_type',
+      [req.user.userId]
+    );
+    
+    res.json(preferencesResult.rows);
+  } catch (error) {
+    console.error('Get notification preferences error:', error);
+    res.status(500).json({ error: 'Failed to load notification preferences' });
+  }
+});
+
+app.post('/api/notifications/preferences', authenticateToken, async (req, res) => {
+  try {
+    const { notificationType, enabled, frequency, timeOfDay, daysOfWeek, soundEnabled, vibrationEnabled } = req.body;
+    
+    if (!notificationType) {
+      return res.status(400).json({ error: 'Notification type is required' });
+    }
+
+    await logDataAccess(req.user.userId, 'update', 'notification_preferences', req);
+    
+    // Upsert notification preference
+    const result = await pool.query(
+      `INSERT INTO notification_preferences 
+       (user_id, notification_type, enabled, frequency, time_of_day, days_of_week, sound_enabled, vibration_enabled, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+       ON CONFLICT (user_id, notification_type) 
+       DO UPDATE SET 
+         enabled = EXCLUDED.enabled,
+         frequency = EXCLUDED.frequency,
+         time_of_day = EXCLUDED.time_of_day,
+         days_of_week = EXCLUDED.days_of_week,
+         sound_enabled = EXCLUDED.sound_enabled,
+         vibration_enabled = EXCLUDED.vibration_enabled,
+         updated_at = NOW()
+       RETURNING *`,
+      [req.user.userId, notificationType, enabled, frequency, timeOfDay, daysOfWeek, soundEnabled, vibrationEnabled]
+    );
+    
+    res.json({ success: true, preference: result.rows[0] });
+  } catch (error) {
+    console.error('Save notification preferences error:', error);
+    res.status(500).json({ error: 'Failed to save notification preferences' });
+  }
+});
+
+// USER APP PREFERENCES ENDPOINTS
+app.get('/api/preferences', authenticateToken, async (req, res) => {
+  try {
+    await logDataAccess(req.user.userId, 'read', 'user_app_preferences', req);
+
+    const preferencesResult = await pool.query(
+      'SELECT * FROM user_app_preferences WHERE user_id = $1',
+      [req.user.userId]
+    );
+    
+    const preferences = {};
+    preferencesResult.rows.forEach(row => {
+      preferences[row.preference_key] = row.preference_value;
+    });
+    
+    res.json(preferences);
+  } catch (error) {
+    console.error('Get app preferences error:', error);
+    res.status(500).json({ error: 'Failed to load app preferences' });
+  }
+});
+
+app.post('/api/preferences', authenticateToken, async (req, res) => {
+  try {
+    const { preferenceKey, preferenceValue, preferenceType, syncAcrossDevices } = req.body;
+    
+    if (!preferenceKey || preferenceValue === undefined) {
+      return res.status(400).json({ error: 'Preference key and value are required' });
+    }
+
+    await logDataAccess(req.user.userId, 'update', 'user_app_preferences', req);
+    
+    const result = await pool.query(
+      `INSERT INTO user_app_preferences 
+       (user_id, preference_key, preference_value, preference_type, sync_across_devices, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (user_id, preference_key) 
+       DO UPDATE SET 
+         preference_value = EXCLUDED.preference_value,
+         preference_type = EXCLUDED.preference_type,
+         sync_across_devices = EXCLUDED.sync_across_devices,
+         updated_at = NOW()
+       RETURNING *`,
+      [req.user.userId, preferenceKey, preferenceValue, preferenceType, syncAcrossDevices]
+    );
+    
+    res.json({ success: true, preference: result.rows[0] });
+  } catch (error) {
+    console.error('Save app preferences error:', error);
+    res.status(500).json({ error: 'Failed to save app preferences' });
+  }
+});
+
+// PRIVACY SETTINGS ENDPOINTS
+app.get('/api/privacy/settings', authenticateToken, async (req, res) => {
+  try {
+    await logDataAccess(req.user.userId, 'read', 'privacy_settings', req);
+
+    const settingsResult = await pool.query(
+      'SELECT * FROM privacy_settings WHERE user_id = $1',
+      [req.user.userId]
+    );
+    
+    const settings = {};
+    settingsResult.rows.forEach(row => {
+      settings[row.setting_name] = row.setting_value;
+    });
+    
+    res.json(settings);
+  } catch (error) {
+    console.error('Get privacy settings error:', error);
+    res.status(500).json({ error: 'Failed to load privacy settings' });
+  }
+});
+
+app.post('/api/privacy/settings', authenticateToken, async (req, res) => {
+  try {
+    const { settingName, settingValue, dataType } = req.body;
+    
+    if (!settingName || settingValue === undefined) {
+      return res.status(400).json({ error: 'Setting name and value are required' });
+    }
+
+    await logDataAccess(req.user.userId, 'update', 'privacy_settings', req);
+    
+    const result = await pool.query(
+      `INSERT INTO privacy_settings 
+       (user_id, setting_name, setting_value, data_type, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (user_id, setting_name) 
+       DO UPDATE SET 
+         setting_value = EXCLUDED.setting_value,
+         data_type = EXCLUDED.data_type,
+         updated_at = NOW()
+       RETURNING *`,
+      [req.user.userId, settingName, settingValue, dataType]
+    );
+    
+    res.json({ success: true, setting: result.rows[0] });
+  } catch (error) {
+    console.error('Save privacy settings error:', error);
+    res.status(500).json({ error: 'Failed to save privacy settings' });
+  }
+});
+
 // PIPEDA: DATA DELETION ENDPOINTS
 app.post('/api/data-deletion', authenticateToken, async (req, res) => {
   try {
@@ -533,6 +849,11 @@ app.delete('/api/user/delete-all-data', authenticateToken, async (req, res) => {
     const userId = req.user.userId;
 
     // Delete all user data in proper order (foreign key constraints)
+    await pool.query('DELETE FROM consent_audit_trail WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM user_app_preferences WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM privacy_settings WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM user_sessions WHERE user_id = $1', [userId]);
+    await pool.query('DELETE FROM notification_preferences WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM data_access_logs WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM data_deletion_requests WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM user_consents WHERE user_id = $1', [userId]);
@@ -566,6 +887,9 @@ app.get('/api/user/export-data', authenticateToken, async (req, res) => {
     const consentResult = await pool.query('SELECT * FROM user_consents WHERE user_id = $1 ORDER BY consent_timestamp DESC', [req.user.userId]);
     const moodResult = await pool.query('SELECT * FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
     const journalResult = await pool.query('SELECT * FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
+    const notificationResult = await pool.query('SELECT * FROM notification_preferences WHERE user_id = $1', [req.user.userId]);
+    const privacyResult = await pool.query('SELECT * FROM privacy_settings WHERE user_id = $1', [req.user.userId]);
+    const preferencesResult = await pool.query('SELECT * FROM user_app_preferences WHERE user_id = $1', [req.user.userId]);
     
     const exportData = {
       exportDate: new Date().toISOString(),
@@ -575,6 +899,9 @@ app.get('/api/user/export-data', authenticateToken, async (req, res) => {
       consents: consentResult.rows,
       moodEntries: moodResult.rows,
       journalEntries: journalResult.rows,
+      notificationPreferences: notificationResult.rows,
+      privacySettings: privacyResult.rows,
+      appPreferences: preferencesResult.rows,
       dataRetentionInfo: {
         retentionPeriodDays: profileResult.rows[0]?.data_retention_period || 365,
         dataTypes: {
@@ -1176,6 +1503,7 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
        SET first_name = $1, 
            pronouns = $2, 
            consent_timestamp = NOW(),
+           onboarding_completed_at = NOW(),
            updated_at = NOW()
        WHERE user_id = $3`,
       [
@@ -1223,7 +1551,15 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
       reminderTime: profile.reminder_time,
       dataPurposes: profile.data_purposes || [],
       consentTimestamp: profile.consent_timestamp,
-      dataRetentionPeriod: profile.data_retention_period || 365
+      dataRetentionPeriod: profile.data_retention_period || 365,
+      appTheme: profile.app_theme || 'system',
+      accessibilityFeatures: profile.accessibility_features || {},
+      languagePreference: profile.language_preference || 'en',
+      timezone: profile.timezone || 'America/Toronto',
+      onboardingCompletedAt: profile.onboarding_completed_at,
+      lastActiveAt: profile.last_active_at,
+      appVersion: profile.app_version,
+      deviceInfo: profile.device_info || {}
     };
     
     res.json(profileData);
@@ -1246,7 +1582,13 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
       reminderTime,
       dataPurposes,
       consentTimestamp,
-      dataRetentionPeriod
+      dataRetentionPeriod,
+      appTheme,
+      accessibilityFeatures,
+      languagePreference,
+      timezone,
+      appVersion,
+      deviceInfo
     } = req.body;
     
     await logDataAccess(req.user.userId, 'update', 'profile', req);
@@ -1264,8 +1606,15 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
            data_purposes = COALESCE($9, data_purposes),
            consent_timestamp = COALESCE($10, consent_timestamp),
            data_retention_period = COALESCE($11, data_retention_period),
+           app_theme = COALESCE($12, app_theme),
+           accessibility_features = COALESCE($13, accessibility_features),
+           language_preference = COALESCE($14, language_preference),
+           timezone = COALESCE($15, timezone),
+           app_version = COALESCE($16, app_version),
+           device_info = COALESCE($17, device_info),
+           last_active_at = NOW(),
            updated_at = NOW()
-       WHERE user_id = $12`,
+       WHERE user_id = $18`,
       [
         firstName,
         pronouns,
@@ -1278,6 +1627,12 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
         dataPurposes,
         consentTimestamp,
         dataRetentionPeriod,
+        appTheme,
+        accessibilityFeatures,
+        languagePreference,
+        timezone,
+        appVersion,
+        deviceInfo,
         req.user.userId
       ]
     );
@@ -1297,7 +1652,9 @@ app.get('/api/mood', authenticateToken, async (req, res) => {
     await logDataAccess(req.user.userId, 'read', 'mood_entries', req);
 
     const moodResult = await pool.query(
-      'SELECT id, mood, note, entry_date as date, data_purpose FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC',
+      `SELECT id, mood, note, entry_date as date, data_purpose, mood_category, 
+              mood_triggers, weather_context, activity_context, privacy_level 
+       FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC`,
       [req.user.userId]
     );
     
@@ -1310,7 +1667,18 @@ app.get('/api/mood', authenticateToken, async (req, res) => {
 
 app.post('/api/mood', authenticateToken, async (req, res) => {
   try {
-    const { id, mood, note, date, dataPurpose = 'mood_tracking' } = req.body;
+    const { 
+      id, 
+      mood, 
+      note, 
+      date, 
+      dataPurpose = 'mood_tracking',
+      moodCategory,
+      moodTriggers,
+      weatherContext,
+      activityContext,
+      privacyLevel = 'private'
+    } = req.body;
     
     if (!mood || !date) {
       return res.status(400).json({ error: 'Mood and date are required' });
@@ -1323,8 +1691,21 @@ app.post('/api/mood', authenticateToken, async (req, res) => {
     await logDataAccess(req.user.userId, 'create', 'mood_entry', req, dataPurpose);
     
     const moodResult = await pool.query(
-      'INSERT INTO mood_entries (user_id, mood, note, entry_date, data_purpose) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [req.user.userId, parseInt(mood), note || null, date, dataPurpose]
+      `INSERT INTO mood_entries 
+       (user_id, mood, note, entry_date, data_purpose, mood_category, mood_triggers, weather_context, activity_context, privacy_level) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [
+        req.user.userId, 
+        parseInt(mood), 
+        note || null, 
+        date, 
+        dataPurpose,
+        moodCategory,
+        moodTriggers,
+        weatherContext,
+        activityContext,
+        privacyLevel
+      ]
     );
     
     const savedEntry = moodResult.rows[0];
@@ -1336,7 +1717,12 @@ app.post('/api/mood', authenticateToken, async (req, res) => {
         mood: savedEntry.mood,
         note: savedEntry.note,
         date: savedEntry.entry_date,
-        dataPurpose: savedEntry.data_purpose
+        dataPurpose: savedEntry.data_purpose,
+        moodCategory: savedEntry.mood_category,
+        moodTriggers: savedEntry.mood_triggers,
+        weatherContext: savedEntry.weather_context,
+        activityContext: savedEntry.activity_context,
+        privacyLevel: savedEntry.privacy_level
       }
     });
   } catch (error) {
@@ -1351,7 +1737,9 @@ app.get('/api/journal', authenticateToken, async (req, res) => {
     await logDataAccess(req.user.userId, 'read', 'journal_entries', req);
 
     const journalResult = await pool.query(
-      'SELECT id, content, prompt, entry_date as date, data_purpose FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC',
+      `SELECT id, content, prompt, entry_date as date, data_purpose, entry_type,
+              emotional_tone, word_count, reading_time_estimate, tags, privacy_level
+       FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC`,
       [req.user.userId]
     );
     
@@ -1364,7 +1752,17 @@ app.get('/api/journal', authenticateToken, async (req, res) => {
 
 app.post('/api/journal', authenticateToken, async (req, res) => {
   try {
-    const { id, content, prompt, date, dataPurpose = 'journaling' } = req.body;
+    const { 
+      id, 
+      content, 
+      prompt, 
+      date, 
+      dataPurpose = 'journaling',
+      entryType = 'free_write',
+      emotionalTone,
+      tags,
+      privacyLevel = 'private'
+    } = req.body;
     
     if (!content || !date) {
       return res.status(400).json({ error: 'Content and date are required' });
@@ -1376,9 +1774,27 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
     
     await logDataAccess(req.user.userId, 'create', 'journal_entry', req, dataPurpose);
     
+    // Calculate word count and reading time estimate
+    const wordCount = content.trim().split(/\s+/).length;
+    const readingTimeEstimate = Math.max(1, Math.ceil(wordCount / 200)); // Assume 200 words per minute
+    
     const journalResult = await pool.query(
-      'INSERT INTO journal_entries (user_id, content, prompt, entry_date, data_purpose) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [req.user.userId, content.trim(), prompt || null, date, dataPurpose]
+      `INSERT INTO journal_entries 
+       (user_id, content, prompt, entry_date, data_purpose, entry_type, emotional_tone, word_count, reading_time_estimate, tags, privacy_level) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [
+        req.user.userId, 
+        content.trim(), 
+        prompt || null, 
+        date, 
+        dataPurpose,
+        entryType,
+        emotionalTone,
+        wordCount,
+        readingTimeEstimate,
+        tags,
+        privacyLevel
+      ]
     );
     
     const savedEntry = journalResult.rows[0];
@@ -1390,7 +1806,13 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
         content: savedEntry.content,
         prompt: savedEntry.prompt,
         date: savedEntry.entry_date,
-        dataPurpose: savedEntry.data_purpose
+        dataPurpose: savedEntry.data_purpose,
+        entryType: savedEntry.entry_type,
+        emotionalTone: savedEntry.emotional_tone,
+        wordCount: savedEntry.word_count,
+        readingTimeEstimate: savedEntry.reading_time_estimate,
+        tags: savedEntry.tags,
+        privacyLevel: savedEntry.privacy_level
       }
     });
   } catch (error) {
@@ -1405,6 +1827,11 @@ app.post('/api/reset', authenticateToken, async (req, res) => {
     await logDataAccess(req.user.userId, 'delete', 'user_data_reset', req, 'user_requested_reset');
 
     // Delete all user data but keep the account
+    await pool.query('DELETE FROM consent_audit_trail WHERE user_id = $1', [req.user.userId]);
+    await pool.query('DELETE FROM user_app_preferences WHERE user_id = $1', [req.user.userId]);
+    await pool.query('DELETE FROM privacy_settings WHERE user_id = $1', [req.user.userId]);
+    await pool.query('DELETE FROM user_sessions WHERE user_id = $1', [req.user.userId]);
+    await pool.query('DELETE FROM notification_preferences WHERE user_id = $1', [req.user.userId]);
     await pool.query('DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id = $1)', [req.user.userId]);
     await pool.query('DELETE FROM chat_sessions WHERE user_id = $1', [req.user.userId]);
     await pool.query('DELETE FROM mood_entries WHERE user_id = $1', [req.user.userId]);
@@ -1432,6 +1859,7 @@ app.post('/api/reset', authenticateToken, async (req, res) => {
        SET first_name = '', 
            pronouns = '', 
            consent_timestamp = NULL,
+           onboarding_completed_at = NULL,
            updated_at = NOW()
        WHERE user_id = $1`,
       [req.user.userId]
@@ -1449,13 +1877,16 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '4.0.0 - PIPEDA Compliant',
+    version: '5.0.0 - Enhanced PIPEDA Compliant',
     database: 'PostgreSQL',
     compliance: 'PIPEDA (Personal Information Protection and Electronic Documents Act)',
     endpoints: [
       '/api/auth/*', 
       '/api/consent',
       '/api/consent/status',
+      '/api/notifications/preferences',
+      '/api/preferences',
+      '/api/privacy/settings',
       '/api/data-deletion',
       '/api/user/delete-all-data',
       '/api/user/export-data',
@@ -1470,7 +1901,10 @@ app.get('/health', (req, res) => {
     ],
     features: [
       'PIPEDA-compliant data handling',
-      'Granular consent management',
+      'Granular consent management with audit trails',
+      'Enhanced notification preferences',
+      'User app preferences storage',
+      'Privacy settings management',
       'Data minimization principles',
       'User rights implementation (access, portability, deletion)',
       'Audit logging for data access',
@@ -1478,7 +1912,18 @@ app.get('/health', (req, res) => {
       'Enhanced privacy controls',
       'Sensitive content detection',
       'Complete data export functionality',
-      'Secure data deletion'
+      'Secure data deletion',
+      'Session management and security'
+    ],
+    newFeatures: [
+      'Notification preferences API',
+      'User app preferences API', 
+      'Privacy settings API',
+      'Enhanced mood tracking with categories and triggers',
+      'Enhanced journaling with tags and emotional tone',
+      'Session management',
+      'Consent audit trail',
+      'Enhanced profile with accessibility features'
     ]
   });
 });
@@ -1498,6 +1943,12 @@ setInterval(async () => {
       console.log(`🧹 Cleaned up ${logsResult.rowCount} old access logs`);
     }
 
+    // Clean up inactive sessions (older than 30 days)
+    const sessionsResult = await pool.query('DELETE FROM user_sessions WHERE last_activity_at < NOW() - INTERVAL \'30 days\'');
+    if (sessionsResult.rowCount > 0) {
+      console.log(`🧹 Cleaned up ${sessionsResult.rowCount} inactive sessions`);
+    }
+
     // Process data retention for all users
     const users = await pool.query('SELECT id FROM users');
     for (const user of users.rows) {
@@ -1510,14 +1961,17 @@ setInterval(async () => {
 }, 86400000); // Run daily (24 hours)
 
 app.listen(PORT, () => {
-  console.log(`✅ Luma PIPEDA-compliant backend running on port ${PORT}`);
+  console.log(`✅ Luma Enhanced PIPEDA-compliant backend running on port ${PORT}`);
   console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
-  console.log(`🗄️ Database: PostgreSQL with PIPEDA-compliant schema`);
+  console.log(`🗄️ Database: PostgreSQL with Enhanced PIPEDA-compliant schema`);
   console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing RESEND_API_KEY'}`);
   console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
   console.log(`🔗 Database URL: ${process.env.DATABASE_URL ? '✅ Configured' : '❌ Missing DATABASE_URL'}`);
-  console.log(`\n🎉 PIPEDA COMPLIANCE FEATURES:`);
+  console.log(`\n🎉 ENHANCED PIPEDA COMPLIANCE FEATURES:`);
   console.log(`   ✅ Granular consent management with audit trails`);
+  console.log(`   ✅ Enhanced notification preferences management`);
+  console.log(`   ✅ User app preferences storage and sync`);
+  console.log(`   ✅ Privacy settings management`);
   console.log(`   ✅ Data minimization (reduced personal data collection)`);
   console.log(`   ✅ User rights implementation (access, portability, deletion)`);
   console.log(`   ✅ Automatic data retention policies`);
@@ -1526,39 +1980,17 @@ app.listen(PORT, () => {
   console.log(`   ✅ Enhanced privacy controls and transparency`);
   console.log(`   ✅ Complete data export in machine-readable format`);
   console.log(`   ✅ Secure data deletion with verification`);
-  console.log(`   ✅ IP address and user agent logging for security`);
-  console.log(`\n📋 PIPEDA COMPLIANCE CHECKLIST:`);
-  console.log(`   ✅ Principle 1: Accountability - Privacy officer designated`);
-  console.log(`   ✅ Principle 2: Identifying Purposes - Clear data purpose tracking`);
-  console.log(`   ✅ Principle 3: Consent - Granular consent management`);
-  console.log(`   ✅ Principle 4: Limiting Collection - Data minimization implemented`);
-  console.log(`   ✅ Principle 5: Limiting Use - Purpose-bound data usage`);
-  console.log(`   ✅ Principle 6: Accuracy - User can correct information`);
-  console.log(`   ✅ Principle 7: Safeguards - Encryption and secure storage`);
-  console.log(`   ✅ Principle 8: Openness - Transparent privacy practices`);
-  console.log(`   ✅ Principle 9: Individual Access - Data export functionality`);
-  console.log(`   ✅ Principle 10: Challenging Compliance - Complaint mechanisms`);
-  console.log(`\nAvailable PIPEDA-compliant endpoints:`);
-  console.log(`- POST /api/auth/register (minimized data collection)`);
-  console.log(`- POST /api/auth/login`);
-  console.log(`- POST /api/auth/forgot-password`);
-  console.log(`- POST /api/auth/reset-password`);
-  console.log(`- GET /api/auth/me`);
-  console.log(`- POST /api/auth/logout`);
-  console.log(`- POST /api/consent (granular consent management)`);
-  console.log(`- GET /api/consent/status (check consent status)`);
-  console.log(`- POST /api/data-deletion (request data deletion)`);
-  console.log(`- DELETE /api/user/delete-all-data (complete data deletion)`);
-  console.log(`- GET /api/user/export-data (PIPEDA-compliant data export)`);
-  console.log(`- POST /api/chat (with consent verification & sensitive content detection)`);
-  console.log(`- GET /api/chat/sessions (with access logging)`);
-  console.log(`- GET /api/chat/sessions/:id (with access logging)`);
-  console.log(`- GET/POST /api/questionnaire (minimized data collection)`);
-  console.log(`- GET/POST /api/profile (with data purpose tracking)`);
-  console.log(`- GET/POST /api/mood (with consent checks & purpose tracking)`);
-  console.log(`- GET/POST /api/journal (with consent checks & purpose tracking)`);
-  console.log(`- POST /api/reset (with audit logging)`);
-  console.log(`\n🔒 PRIVACY & SECURITY FEATURES:`);
+  console.log(`   ✅ Session management and security tracking`);
+  console.log(`   ✅ Enhanced mood tracking with categories and triggers`);
+  console.log(`   ✅ Enhanced journaling with tags and emotional analysis`);
+  console.log(`\n📋 NEW API ENDPOINTS:`);
+  console.log(`   - GET/POST /api/notifications/preferences (notification management)`);
+  console.log(`   - GET/POST /api/preferences (app preferences storage)`);
+  console.log(`   - GET/POST /api/privacy/settings (privacy controls)`);
+  console.log(`   - Enhanced /api/mood (with categories and triggers)`);
+  console.log(`   - Enhanced /api/journal (with tags and emotional tone)`);
+  console.log(`   - Enhanced /api/profile (with accessibility features)`);
+  console.log(`\n🔒 ENHANCED PRIVACY & SECURITY FEATURES:`);
   console.log(`   - All data access is logged with IP and timestamp`);
   console.log(`   - Automatic data retention policy enforcement`);
   console.log(`   - Sensitive content detection in chat messages`);
@@ -1566,6 +1998,8 @@ app.listen(PORT, () => {
   console.log(`   - Complete audit trail for compliance reporting`);
   console.log(`   - User can export all data in machine-readable format`);
   console.log(`   - Granular consent per data type (chat, mood, journal)`);
+  console.log(`   - Session management with security tracking`);
+  console.log(`   - Enhanced notification and privacy controls`);
   console.log(`\n📞 PRIVACY CONTACT: griffencoutts@gmail.com`);
   console.log(`📖 PRIVACY POLICY: Available in app settings`);
   console.log(`🏛️ JURISDICTION: Ontario, Canada (PIPEDA compliance)`);
