@@ -139,7 +139,7 @@ async function initializeDatabase() {
       )
     `);
 
-    // Questionnaire responses
+    // Questionnaire responses - FIXED: Create without data_purpose initially
     await pool.query(`
       CREATE TABLE IF NOT EXISTS questionnaire_responses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -149,7 +149,6 @@ async function initializeDatabase() {
         pronouns VARCHAR(50),
         main_goals TEXT[],
         communication_style VARCHAR(255),
-        data_purpose VARCHAR(100) DEFAULT 'app_personalization',
         consent_given BOOLEAN DEFAULT false,
         completed_at TIMESTAMP WITH TIME ZONE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -157,7 +156,18 @@ async function initializeDatabase() {
       )
     `);
 
-    // Mood entries
+    // Add data_purpose column separately (in case it doesn't exist)
+    try {
+      await pool.query(`
+        ALTER TABLE questionnaire_responses 
+        ADD COLUMN IF NOT EXISTS data_purpose VARCHAR(100) DEFAULT 'app_personalization'
+      `);
+      console.log('✅ questionnaire data_purpose column ensured');
+    } catch (alterError) {
+      console.log('⚠️ Could not add questionnaire data_purpose column:', alterError.message);
+    }
+
+    // Mood entries - FIXED: Create without data_purpose initially
     await pool.query(`
       CREATE TABLE IF NOT EXISTS mood_entries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -165,12 +175,22 @@ async function initializeDatabase() {
         mood INTEGER NOT NULL CHECK (mood >= 1 AND mood <= 10),
         note TEXT,
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
-        data_purpose VARCHAR(100) DEFAULT 'mood_tracking',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
 
-    // Journal entries
+    // Add data_purpose column separately
+    try {
+      await pool.query(`
+        ALTER TABLE mood_entries 
+        ADD COLUMN IF NOT EXISTS data_purpose VARCHAR(100) DEFAULT 'mood_tracking'
+      `);
+      console.log('✅ mood_entries data_purpose column ensured');
+    } catch (alterError) {
+      console.log('⚠️ Could not add mood_entries data_purpose column:', alterError.message);
+    }
+
+    // Journal entries - FIXED: Create without data_purpose initially
     await pool.query(`
       CREATE TABLE IF NOT EXISTS journal_entries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -178,10 +198,20 @@ async function initializeDatabase() {
         content TEXT NOT NULL,
         prompt TEXT,
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
-        data_purpose VARCHAR(100) DEFAULT 'journaling',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
+
+    // Add data_purpose column separately
+    try {
+      await pool.query(`
+        ALTER TABLE journal_entries 
+        ADD COLUMN IF NOT EXISTS data_purpose VARCHAR(100) DEFAULT 'journaling'
+      `);
+      console.log('✅ journal_entries data_purpose column ensured');
+    } catch (alterError) {
+      console.log('⚠️ Could not add journal_entries data_purpose column:', alterError.message);
+    }
 
     // Chat sessions
     await pool.query(`
@@ -350,14 +380,26 @@ app.post('/api/auth/register', async (req, res) => {
         // Continue anyway - this is not critical for registration
       }
 
-      // Create questionnaire response
+      // Create questionnaire response - FIXED: Remove data_purpose from initial insert
       console.log('📝 Creating questionnaire record...');
       const questionnaireResult = await client.query(
-        `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-        [newUser.id, false, '', '', [], '', 'app_personalization', false]
+        `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, consent_given) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [newUser.id, false, '', '', [], '', false]
       );
       console.log('✅ Questionnaire record created with ID:', questionnaireResult.rows[0].id);
+
+      // Update questionnaire with data_purpose separately (if column exists)
+      try {
+        await client.query(
+          `UPDATE questionnaire_responses SET data_purpose = $1 WHERE user_id = $2`,
+          ['app_personalization', newUser.id]
+        );
+        console.log('✅ Questionnaire data_purpose updated successfully');
+      } catch (dataPurposeError) {
+        console.log('⚠️ Could not set questionnaire data_purpose (column may not exist):', dataPurposeError.message);
+        // Continue anyway - this is not critical for registration
+      }
 
       await client.query('COMMIT');
       console.log('✅ Transaction committed successfully');
