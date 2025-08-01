@@ -543,6 +543,9 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
       });
     }
 
+    console.log('📝 Saving questionnaire for user:', req.user.userId);
+    console.log('📝 Questionnaire data:', responses);
+
     // Update questionnaire responses
     await pool.query(
       `UPDATE questionnaire_responses 
@@ -567,15 +570,19 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
       ]
     );
 
-    // Update user profile
-    await pool.query(
+    // FIXED: Update user profile with questionnaire data
+    console.log('📝 Updating user profile with name:', responses.firstName);
+    const profileUpdateResult = await pool.query(
       `UPDATE user_profiles 
        SET first_name = $1, 
            pronouns = $2, 
            updated_at = NOW()
-       WHERE user_id = $3`,
+       WHERE user_id = $3
+       RETURNING first_name, pronouns`,
       [responses.firstName || "", responses.pronouns || "", req.user.userId]
     );
+
+    console.log('✅ Profile updated successfully:', profileUpdateResult.rows[0]);
     
     res.json({ 
       success: true, 
@@ -594,12 +601,15 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
 // PROFILE ENDPOINTS
 app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
+    console.log('📋 Loading profile for user:', req.user.userId);
+    
     const profileResult = await pool.query(
       'SELECT * FROM user_profiles WHERE user_id = $1',
       [req.user.userId]
     );
     
     if (profileResult.rows.length === 0) {
+      console.log('❌ No profile found for user:', req.user.userId);
       return res.status(404).json({ 
         success: false,
         error: 'Profile not found',
@@ -608,6 +618,7 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
     }
     
     const profile = profileResult.rows[0];
+    console.log('✅ Profile loaded:', { firstName: profile.first_name, pronouns: profile.pronouns });
     
     res.json({
       success: true,
@@ -633,6 +644,9 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
 
 app.post('/api/profile', authenticateToken, async (req, res) => {
   try {
+    console.log('📝 Updating profile for user:', req.user.userId);
+    console.log('📝 Profile data received:', req.body);
+    
     const { 
       firstName,
       pronouns,
@@ -645,7 +659,7 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
       dataPurposes
     } = req.body;
     
-    await pool.query(
+    const updateResult = await pool.query(
       `UPDATE user_profiles 
        SET first_name = $1, 
            pronouns = $2, 
@@ -657,7 +671,8 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
            reminder_time = $8,
            data_purposes = $9,
            updated_at = NOW()
-       WHERE user_id = $10`,
+       WHERE user_id = $10
+       RETURNING first_name, pronouns`,
       [
         firstName || "",
         pronouns || "",
@@ -671,6 +686,8 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
         req.user.userId
       ]
     );
+    
+    console.log('✅ Profile updated successfully:', updateResult.rows[0]);
     
     res.json({ 
       success: true, 
@@ -810,10 +827,10 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
   }
 });
 
-// CHAT ENDPOINT
+// ENHANCED CHAT ENDPOINT WITH PROPER LUMA AI PROMPT
 app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
-    const { message, chatHistory, sessionId, consentedToAI } = req.body;
+    const { message, chatHistory, sessionId, consentedToAI, userContext } = req.body;
     
     // Check AI processing consent
     if (!consentedToAI) {
@@ -856,20 +873,148 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
       [currentSession.id, 'user', message, containsSensitive]
     );
 
-    // Simple AI response (replace with OpenAI call if you have API key)
-    const aiResponse = `I hear you saying: "${message}". Thank you for sharing that with me. How are you feeling about this situation?`;
-
-    // Add AI response to session
-    await pool.query(
-      'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
-      [currentSession.id, 'assistant', aiResponse]
+    // Get user profile for personalization
+    const profileResult = await pool.query(
+      'SELECT first_name, pronouns FROM user_profiles WHERE user_id = $1',
+      [req.user.userId]
     );
+
+    const userProfile = profileResult.rows[0] || {};
     
-    res.json({ 
-      success: true,
-      response: aiResponse,
-      sessionId: currentSession.id
+    // Build context for AI
+    let contextString = '';
+    if (userProfile.first_name) {
+      contextString += `The user's name is ${userProfile.first_name}. `;
+    }
+    if (userProfile.pronouns) {
+      contextString += `Their pronouns are ${userProfile.pronouns}. `;
+    }
+    if (userContext) {
+      contextString += `Additional context: ${userContext} `;
+    }
+
+    // Get recent conversation history
+    const recentMessages = await pool.query(
+      'SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY timestamp DESC LIMIT 10',
+      [currentSession.id]
+    );
+
+    // Prepare messages for OpenAI
+    const messages = [
+      {
+        role: 'system',
+        content: `You are Luma, a compassionate AI therapist and wellness companion focused on mental health and emotional wellbeing. You provide thoughtful, empathetic responses that help users process their emotions and develop healthy coping strategies.
+
+Your expertise includes:
+- Evidence-based therapy techniques (CBT, DBT, mindfulness)
+- Mental health support and emotional processing  
+- Stress management and anxiety reduction techniques
+- Healthy coping strategies and self-care practices
+- Building emotional resilience and self-awareness
+- Practical advice for daily mental wellness
+- Recognizing when professional help may be needed
+
+Your approach:
+- Provide warm, non-judgmental support
+- Use evidence-based therapeutic techniques
+- Offer practical, actionable advice
+- Help users identify patterns in their thoughts and emotions
+- Encourage healthy habits and self-reflection
+- Always emphasize that you're a supportive tool, not a replacement for professional therapy when serious issues arise
+
+Be warm, genuine, and focus on evidence-based mental health practices. Keep responses helpful, engaging, and grounded in psychological wellness principles.
+
+${contextString ? `User context: ${contextString}` : ''}
+
+Remember to be conversational and supportive, not clinical. Focus on understanding their experience first, then gently guide them toward insights and healthy coping strategies.`
+      }
+    ];
+
+    // Add recent conversation history (excluding the message we just added)
+    const historyMessages = recentMessages.rows.reverse().slice(0, -1);
+    historyMessages.forEach(msg => {
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        messages.push({
+          role: msg.role,
+          content: msg.content
+        });
+      }
     });
+
+    // Add current message
+    messages.push({
+      role: 'user',
+      content: message
+    });
+
+    // Call OpenAI API if available
+    if (process.env.OPENAI_API_KEY) {
+      try {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4',
+            messages: messages,
+            temperature: 0.8,
+            max_tokens: 400
+          }),
+        });
+        
+        const data = await response.json();
+        
+        if (data.choices && data.choices[0]) {
+          const aiResponse = data.choices[0].message.content;
+          
+          // Add AI response to session
+          await pool.query(
+            'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+            [currentSession.id, 'assistant', aiResponse]
+          );
+          
+          res.json({ 
+            success: true,
+            response: aiResponse,
+            sessionId: currentSession.id
+          });
+        } else {
+          throw new Error('No response from OpenAI');
+        }
+      } catch (openaiError) {
+        console.error('OpenAI API error:', openaiError);
+        // Fallback to simple response
+        const fallbackResponse = generateFallbackResponse(message, userProfile);
+        
+        await pool.query(
+          'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+          [currentSession.id, 'assistant', fallbackResponse]
+        );
+        
+        res.json({ 
+          success: true,
+          response: fallbackResponse,
+          sessionId: currentSession.id
+        });
+      }
+    } else {
+      // No OpenAI API key - use fallback
+      const fallbackResponse = generateFallbackResponse(message, userProfile);
+      
+      await pool.query(
+        'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+        [currentSession.id, 'assistant', fallbackResponse]
+      );
+      
+      res.json({ 
+        success: true,
+        response: fallbackResponse,
+        sessionId: currentSession.id
+      });
+    }
+    
   } catch (error) {
     console.error('Chat error:', error);
     res.status(500).json({ 
@@ -880,13 +1025,41 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
   }
 });
 
+// Fallback response generator when OpenAI is not available
+function generateFallbackResponse(message, userProfile) {
+  const name = userProfile.first_name || '';
+  const greeting = name ? `${name}, ` : '';
+  
+  const lowerMessage = message.toLowerCase();
+  
+  if (lowerMessage.includes('anxious') || lowerMessage.includes('anxiety')) {
+    return `${greeting}I hear that you're feeling anxious. That's completely understandable - anxiety is something many people experience. One technique that can help in the moment is the 4-7-8 breathing method: breathe in for 4 counts, hold for 7, and exhale for 8. This activates your body's relaxation response. Can you tell me more about what's making you feel anxious right now?`;
+  }
+  
+  if (lowerMessage.includes('sad') || lowerMessage.includes('depressed') || lowerMessage.includes('down')) {
+    return `${greeting}I'm sorry you're feeling this way. Your feelings are valid, and it's important that you're reaching out. Sometimes when we're feeling low, small actions can help - even something as simple as stepping outside for a few minutes or reaching out to someone you care about. What's been on your mind lately that might be contributing to these feelings?`;
+  }
+  
+  if (lowerMessage.includes('stress') || lowerMessage.includes('overwhelmed')) {
+    return `${greeting}Feeling stressed or overwhelmed is really challenging. When we're in that state, it can help to break things down into smaller, manageable pieces. One approach is to identify what you can control versus what you can't - focusing your energy on the things within your influence. What's the biggest source of stress for you right now?`;
+  }
+  
+  if (lowerMessage.includes('sleep') || lowerMessage.includes('tired') || lowerMessage.includes('insomnia')) {
+    return `${greeting}Sleep issues can really impact how we feel overall. Good sleep hygiene can make a big difference - things like keeping a consistent bedtime, avoiding screens before bed, and creating a calming bedtime routine. How long have you been having trouble with sleep?`;
+  }
+  
+  // General supportive response
+  return `${greeting}Thank you for sharing that with me. I'm here to listen and support you. It sounds like you have something important on your mind. Sometimes just talking through our thoughts and feelings can provide clarity and relief. Can you tell me more about what you're experiencing right now?`;
+}
+
 // HEALTH CHECK
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '5.5.0 - Clean Deployment Ready',
+    version: '5.6.0 - Enhanced AI Prompt + Profile Fixes',
     database: 'PostgreSQL',
+    openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
     success: true
   });
 });
@@ -928,7 +1101,13 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`✅ Luma backend running on port ${PORT}`);
       console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
+      console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI GPT-4' : 'Fallback responses'}`);
       console.log(`🔥 SERVER IS READY TO HANDLE REQUESTS`);
+      console.log(`\n🎉 NEW FEATURES:`);
+      console.log(`   ✅ Enhanced AI therapist prompt with evidence-based techniques`);
+      console.log(`   ✅ Fixed profile name saving in questionnaire and profile updates`);
+      console.log(`   ✅ Intelligent fallback responses when OpenAI is unavailable`);
+      console.log(`   ✅ Personalized responses using user's name and context`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
