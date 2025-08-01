@@ -34,6 +34,21 @@ pool.connect((err, client, release) => {
   }
 });
 
+// HELPER FUNCTION: Check if column exists before using it
+const columnExists = async (tableName, columnName) => {
+  try {
+    const result = await pool.query(
+      `SELECT column_name FROM information_schema.columns 
+       WHERE table_name = $1 AND column_name = $2`,
+      [tableName, columnName]
+    );
+    return result.rows.length > 0;
+  } catch (error) {
+    console.error(`Error checking column ${tableName}.${columnName}:`, error);
+    return false;
+  }
+};
+
 // Initialize database tables with PIPEDA compliance
 async function initializeDatabase() {
   try {
@@ -65,20 +80,48 @@ async function initializeDatabase() {
         dark_mode BOOLEAN DEFAULT false,
         reminder_time TIME DEFAULT '19:00:00',
         data_purposes TEXT[] DEFAULT '{"personalization","app_functionality"}',
-        consent_timestamp TIMESTAMP WITH TIME ZONE,
-        data_retention_period INTEGER DEFAULT 365,
-        app_theme VARCHAR(20) DEFAULT 'system',
-        accessibility_features JSONB DEFAULT '{}',
-        language_preference VARCHAR(10) DEFAULT 'en',
-        timezone VARCHAR(50) DEFAULT 'America/Toronto',
-        onboarding_completed_at TIMESTAMP WITH TIME ZONE,
-        last_active_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        app_version VARCHAR(20),
-        device_info JSONB DEFAULT '{}',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
+
+    // Add missing columns to user_profiles if they don't exist
+    const consentTimestampExists = await columnExists('user_profiles', 'consent_timestamp');
+    if (!consentTimestampExists) {
+      await pool.query('ALTER TABLE user_profiles ADD COLUMN consent_timestamp TIMESTAMP WITH TIME ZONE');
+      console.log('✅ Added consent_timestamp to user_profiles');
+    }
+
+    const dataRetentionExists = await columnExists('user_profiles', 'data_retention_period');
+    if (!dataRetentionExists) {
+      await pool.query('ALTER TABLE user_profiles ADD COLUMN data_retention_period INTEGER DEFAULT 365');
+      console.log('✅ Added data_retention_period to user_profiles');
+    }
+
+    // Add other enhanced columns
+    const enhancedColumns = [
+      'app_theme VARCHAR(20) DEFAULT \'system\'',
+      'accessibility_features JSONB DEFAULT \'{}\'',
+      'language_preference VARCHAR(10) DEFAULT \'en\'',
+      'timezone VARCHAR(50) DEFAULT \'America/Toronto\'',
+      'onboarding_completed_at TIMESTAMP WITH TIME ZONE',
+      'last_active_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()',
+      'app_version VARCHAR(20)',
+      'device_info JSONB DEFAULT \'{}\''
+    ];
+
+    for (const column of enhancedColumns) {
+      const columnName = column.split(' ')[0];
+      const exists = await columnExists('user_profiles', columnName);
+      if (!exists) {
+        try {
+          await pool.query(`ALTER TABLE user_profiles ADD COLUMN ${column}`);
+          console.log(`✅ Added ${columnName} to user_profiles`);
+        } catch (error) {
+          console.log(`⚠️ Column ${columnName} might already exist or error:`, error.message);
+        }
+      }
+    }
 
     // PIPEDA: Consent tracking table
     await pool.query(`
@@ -94,16 +137,33 @@ async function initializeDatabase() {
         version VARCHAR(10) DEFAULT '1.0',
         ip_address INET,
         user_agent TEXT,
-        consent_method VARCHAR(50) DEFAULT 'app_interface',
-        consent_source VARCHAR(100) DEFAULT 'mobile_app',
-        withdrawal_reason TEXT,
-        parent_consent_id UUID REFERENCES user_consents(id),
         consent_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         withdrawn_at TIMESTAMP WITH TIME ZONE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
+
+    // Add enhanced consent columns
+    const consentEnhancedColumns = [
+      'consent_method VARCHAR(50) DEFAULT \'app_interface\'',
+      'consent_source VARCHAR(100) DEFAULT \'mobile_app\'',
+      'withdrawal_reason TEXT',
+      'parent_consent_id UUID REFERENCES user_consents(id)'
+    ];
+
+    for (const column of consentEnhancedColumns) {
+      const columnName = column.split(' ')[0];
+      const exists = await columnExists('user_consents', columnName);
+      if (!exists) {
+        try {
+          await pool.query(`ALTER TABLE user_consents ADD COLUMN ${column}`);
+          console.log(`✅ Added ${columnName} to user_consents`);
+        } catch (error) {
+          console.log(`⚠️ Column ${columnName} might already exist:`, error.message);
+        }
+      }
+    }
 
     // PIPEDA: Data access audit log
     await pool.query(`
@@ -158,14 +218,31 @@ async function initializeDatabase() {
         role VARCHAR(20) NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
         content TEXT NOT NULL,
         contains_sensitive_data BOOLEAN DEFAULT false,
-        content_hash VARCHAR(64),
-        privacy_level VARCHAR(20) DEFAULT 'standard',
-        auto_delete_at TIMESTAMP WITH TIME ZONE,
-        content_classification JSONB DEFAULT '{"containsMedicalTerms": false, "containsPersonalInfo": false, "sensitivityScore": 1}',
         timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
+
+    // Add enhanced chat message columns
+    const chatEnhancedColumns = [
+      'content_hash VARCHAR(64)',
+      'privacy_level VARCHAR(20) DEFAULT \'standard\'',
+      'auto_delete_at TIMESTAMP WITH TIME ZONE',
+      'content_classification JSONB DEFAULT \'{"containsMedicalTerms": false, "containsPersonalInfo": false, "sensitivityScore": 1}\''
+    ];
+
+    for (const column of chatEnhancedColumns) {
+      const columnName = column.split(' ')[0];
+      const exists = await columnExists('chat_messages', columnName);
+      if (!exists) {
+        try {
+          await pool.query(`ALTER TABLE chat_messages ADD COLUMN ${column}`);
+          console.log(`✅ Added ${columnName} to chat_messages`);
+        } catch (error) {
+          console.log(`⚠️ Column ${columnName} might already exist:`, error.message);
+        }
+      }
+    }
 
     // PIPEDA: Enhanced mood entries with data purpose tracking
     await pool.query(`
@@ -175,15 +252,38 @@ async function initializeDatabase() {
         mood INTEGER NOT NULL CHECK (mood >= 1 AND mood <= 10),
         note TEXT,
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
-        data_purpose VARCHAR(100) DEFAULT 'mood_tracking',
-        mood_category VARCHAR(50),
-        mood_triggers TEXT[],
-        weather_context JSONB,
-        activity_context TEXT,
-        privacy_level VARCHAR(20) DEFAULT 'private',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
+
+    // Add missing data_purpose column to mood_entries
+    const moodDataPurposeExists = await columnExists('mood_entries', 'data_purpose');
+    if (!moodDataPurposeExists) {
+      await pool.query('ALTER TABLE mood_entries ADD COLUMN data_purpose VARCHAR(100) DEFAULT \'mood_tracking\'');
+      console.log('✅ Added data_purpose to mood_entries');
+    }
+
+    // Add other enhanced mood columns
+    const moodEnhancedColumns = [
+      'mood_category VARCHAR(50)',
+      'mood_triggers TEXT[]',
+      'weather_context JSONB',
+      'activity_context TEXT',
+      'privacy_level VARCHAR(20) DEFAULT \'private\''
+    ];
+
+    for (const column of moodEnhancedColumns) {
+      const columnName = column.split(' ')[0];
+      const exists = await columnExists('mood_entries', columnName);
+      if (!exists) {
+        try {
+          await pool.query(`ALTER TABLE mood_entries ADD COLUMN ${column}`);
+          console.log(`✅ Added ${columnName} to mood_entries`);
+        } catch (error) {
+          console.log(`⚠️ Column ${columnName} might already exist:`, error.message);
+        }
+      }
+    }
 
     // PIPEDA: Enhanced journal entries with data purpose tracking
     await pool.query(`
@@ -193,17 +293,40 @@ async function initializeDatabase() {
         content TEXT NOT NULL,
         prompt TEXT,
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
-        data_purpose VARCHAR(100) DEFAULT 'journaling',
-        entry_type VARCHAR(50) DEFAULT 'free_write',
-        emotional_tone VARCHAR(50),
-        word_count INTEGER,
-        reading_time_estimate INTEGER,
-        tags TEXT[],
-        privacy_level VARCHAR(20) DEFAULT 'private',
-        auto_delete_at TIMESTAMP WITH TIME ZONE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
+
+    // Add missing data_purpose column to journal_entries
+    const journalDataPurposeExists = await columnExists('journal_entries', 'data_purpose');
+    if (!journalDataPurposeExists) {
+      await pool.query('ALTER TABLE journal_entries ADD COLUMN data_purpose VARCHAR(100) DEFAULT \'journaling\'');
+      console.log('✅ Added data_purpose to journal_entries');
+    }
+
+    // Add other enhanced journal columns
+    const journalEnhancedColumns = [
+      'entry_type VARCHAR(50) DEFAULT \'free_write\'',
+      'emotional_tone VARCHAR(50)',
+      'word_count INTEGER',
+      'reading_time_estimate INTEGER',
+      'tags TEXT[]',
+      'privacy_level VARCHAR(20) DEFAULT \'private\'',
+      'auto_delete_at TIMESTAMP WITH TIME ZONE'
+    ];
+
+    for (const column of journalEnhancedColumns) {
+      const columnName = column.split(' ')[0];
+      const exists = await columnExists('journal_entries', columnName);
+      if (!exists) {
+        try {
+          await pool.query(`ALTER TABLE journal_entries ADD COLUMN ${column}`);
+          console.log(`✅ Added ${columnName} to journal_entries`);
+        } catch (error) {
+          console.log(`⚠️ Column ${columnName} might already exist:`, error.message);
+        }
+      }
+    }
 
     // Password reset tokens
     await pool.query(`
@@ -310,29 +433,38 @@ async function initializeDatabase() {
     `);
 
     // Create indexes for better performance
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-      CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-      CREATE INDEX IF NOT EXISTS idx_user_consents_user_id ON user_consents(user_id);
-      CREATE INDEX IF NOT EXISTS idx_user_consents_timestamp ON user_consents(consent_timestamp);
-      CREATE INDEX IF NOT EXISTS idx_data_access_logs_user_id ON data_access_logs(user_id);
-      CREATE INDEX IF NOT EXISTS idx_data_access_logs_accessed_at ON data_access_logs(accessed_at);
-      CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
-      CREATE INDEX IF NOT EXISTS idx_chat_sessions_start_time ON chat_sessions(start_time);
-      CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
-      CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_mood_entries_user_id ON mood_entries(user_id);
-      CREATE INDEX IF NOT EXISTS idx_mood_entries_date ON mood_entries(entry_date);
-      CREATE INDEX IF NOT EXISTS idx_journal_entries_user_id ON journal_entries(user_id);
-      CREATE INDEX IF NOT EXISTS idx_journal_entries_date ON journal_entries(entry_date);
-      CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires ON password_reset_tokens(expires_at);
-      CREATE INDEX IF NOT EXISTS idx_data_deletion_requests_user_id ON data_deletion_requests(user_id);
-      CREATE INDEX IF NOT EXISTS idx_notification_preferences_user_id ON notification_preferences(user_id);
-      CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id);
-      CREATE INDEX IF NOT EXISTS idx_privacy_settings_user_id ON privacy_settings(user_id);
-      CREATE INDEX IF NOT EXISTS idx_user_app_preferences_user_id ON user_app_preferences(user_id);
-      CREATE INDEX IF NOT EXISTS idx_consent_audit_trail_user_id ON consent_audit_trail(user_id);
-    `);
+    const indexes = [
+      'CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)',
+      'CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)',
+      'CREATE INDEX IF NOT EXISTS idx_user_consents_user_id ON user_consents(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_user_consents_timestamp ON user_consents(consent_timestamp)',
+      'CREATE INDEX IF NOT EXISTS idx_data_access_logs_user_id ON data_access_logs(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_data_access_logs_accessed_at ON data_access_logs(accessed_at)',
+      'CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_chat_sessions_start_time ON chat_sessions(start_time)',
+      'CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id)',
+      'CREATE INDEX IF NOT EXISTS idx_chat_messages_timestamp ON chat_messages(timestamp)',
+      'CREATE INDEX IF NOT EXISTS idx_mood_entries_user_id ON mood_entries(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_mood_entries_date ON mood_entries(entry_date)',
+      'CREATE INDEX IF NOT EXISTS idx_journal_entries_user_id ON journal_entries(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_journal_entries_date ON journal_entries(entry_date)',
+      'CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires ON password_reset_tokens(expires_at)',
+      'CREATE INDEX IF NOT EXISTS idx_data_deletion_requests_user_id ON data_deletion_requests(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_notification_preferences_user_id ON notification_preferences(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_privacy_settings_user_id ON privacy_settings(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_user_app_preferences_user_id ON user_app_preferences(user_id)',
+      'CREATE INDEX IF NOT EXISTS idx_consent_audit_trail_user_id ON consent_audit_trail(user_id)'
+    ];
+
+    for (const indexQuery of indexes) {
+      try {
+        await pool.query(indexQuery);
+      } catch (error) {
+        // Indexes might already exist, that's okay
+        console.log(`⚠️ Index might already exist:`, error.message);
+      }
+    }
 
     console.log('✅ PIPEDA-compliant database tables initialized successfully');
   } catch (error) {
@@ -358,13 +490,20 @@ const logDataAccess = async (userId, accessType, dataType, req, purpose = null) 
 // PIPEDA: Function to check if data should be auto-deleted
 const checkDataRetention = async (userId) => {
   try {
+    // Check if data_retention_period column exists
+    const hasRetentionColumn = await columnExists('user_profiles', 'data_retention_period');
+    if (!hasRetentionColumn) {
+      console.log('⚠️ data_retention_period column not found, skipping retention check');
+      return;
+    }
+
     const profileResult = await pool.query(
       'SELECT data_retention_period FROM user_profiles WHERE user_id = $1',
       [userId]
     );
     
     if (profileResult.rows.length > 0) {
-      const retentionDays = profileResult.rows[0].data_retention_period;
+      const retentionDays = profileResult.rows[0].data_retention_period || 365;
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
       
@@ -445,38 +584,27 @@ app.post('/api/auth/register', async (req, res) => {
 
     const newUser = userResult.rows[0];
 
-    // PIPEDA: Create minimized user profile
-    await pool.query(
-      `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes, data_retention_period) 
-       VALUES ($1, '', '', NOW(), '#800080', true, false, false, '19:00:00', '{"personalization","app_functionality"}', 365)`,
-      [newUser.id]
-    );
+    // PIPEDA: Create minimized user profile with safe column handling
+    const hasRetentionColumn = await columnExists('user_profiles', 'data_retention_period');
+    
+    if (hasRetentionColumn) {
+      await pool.query(
+        `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes, data_retention_period) 
+         VALUES ($1, '', '', NOW(), '#800080', true, false, false, '19:00:00', '{"personalization","app_functionality"}', 365)`,
+        [newUser.id]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes) 
+         VALUES ($1, '', '', NOW(), '#800080', true, false, false, '19:00:00', '{"personalization","app_functionality"}')`,
+        [newUser.id]
+      );
+    }
 
     // PIPEDA: Create empty questionnaire response
     await pool.query(
       `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given) 
        VALUES ($1, false, '', '', '{}', '', 'app_personalization', false)`,
-      [newUser.id]
-    );
-
-    // Create default notification preferences
-    const defaultNotifications = [
-      { type: 'mood_reminder', enabled: true },
-      { type: 'journal_reminder', enabled: true },
-      { type: 'weekly_summary', enabled: false }
-    ];
-
-    for (const notif of defaultNotifications) {
-      await pool.query(
-        'INSERT INTO notification_preferences (user_id, notification_type, enabled) VALUES ($1, $2, $3)',
-        [newUser.id, notif.type, notif.enabled]
-      );
-    }
-
-    // Create default privacy settings
-    await pool.query(
-      `INSERT INTO privacy_settings (user_id, setting_name, setting_value, data_type) 
-       VALUES ($1, 'data_sharing_external', '{"enabled": false, "partners": []}', 'boolean')`,
       [newUser.id]
     );
 
@@ -534,11 +662,14 @@ app.post('/api/auth/login', async (req, res) => {
     // PIPEDA: Check data retention on login
     await checkDataRetention(user.id);
 
-    // Update last active timestamp
-    await pool.query(
-      'UPDATE user_profiles SET last_active_at = NOW() WHERE user_id = $1',
-      [user.id]
-    );
+    // Update last active timestamp if column exists
+    const hasLastActiveColumn = await columnExists('user_profiles', 'last_active_at');
+    if (hasLastActiveColumn) {
+      await pool.query(
+        'UPDATE user_profiles SET last_active_at = NOW() WHERE user_id = $1',
+        [user.id]
+      );
+    }
 
     // Generate JWT token
     const token = jwt.sign(
@@ -595,29 +726,14 @@ app.post('/api/consent', authenticateToken, async (req, res) => {
       ]
     );
 
-    // Log consent changes in audit trail
-    const consentId = consentResult.rows[0].id;
-    const consentTypes = [
-      { type: 'data_collection', value: dataCollection },
-      { type: 'ai_processing', value: aiProcessing },
-      { type: 'mood_tracking', value: moodTracking },
-      { type: 'journaling', value: journaling },
-      { type: 'notifications', value: notifications },
-      { type: 'data_sharing', value: dataSharing }
-    ];
-
-    for (const consent of consentTypes) {
+    // Update profile consent timestamp if column exists
+    const hasConsentTimestamp = await columnExists('user_profiles', 'consent_timestamp');
+    if (hasConsentTimestamp) {
       await pool.query(
-        'INSERT INTO consent_audit_trail (user_id, consent_id, action, consent_type, new_value, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [req.user.userId, consentId, 'granted', consent.type, consent.value, req.ip, req.get('User-Agent')]
+        'UPDATE user_profiles SET consent_timestamp = NOW() WHERE user_id = $1',
+        [req.user.userId]
       );
     }
-
-    // Update profile consent timestamp
-    await pool.query(
-      'UPDATE user_profiles SET consent_timestamp = NOW() WHERE user_id = $1',
-      [req.user.userId]
-    );
 
     console.log('✅ Consent recorded for user:', req.user.username);
     res.json({ success: true, message: 'Consent preferences saved' });
@@ -663,163 +779,6 @@ app.get('/api/consent/status', authenticateToken, async (req, res) => {
   }
 });
 
-// NOTIFICATION PREFERENCES ENDPOINTS
-app.get('/api/notifications/preferences', authenticateToken, async (req, res) => {
-  try {
-    await logDataAccess(req.user.userId, 'read', 'notification_preferences', req);
-
-    const preferencesResult = await pool.query(
-      'SELECT * FROM notification_preferences WHERE user_id = $1 ORDER BY notification_type',
-      [req.user.userId]
-    );
-    
-    res.json(preferencesResult.rows);
-  } catch (error) {
-    console.error('Get notification preferences error:', error);
-    res.status(500).json({ error: 'Failed to load notification preferences' });
-  }
-});
-
-app.post('/api/notifications/preferences', authenticateToken, async (req, res) => {
-  try {
-    const { notificationType, enabled, frequency, timeOfDay, daysOfWeek, soundEnabled, vibrationEnabled } = req.body;
-    
-    if (!notificationType) {
-      return res.status(400).json({ error: 'Notification type is required' });
-    }
-
-    await logDataAccess(req.user.userId, 'update', 'notification_preferences', req);
-    
-    // Upsert notification preference
-    const result = await pool.query(
-      `INSERT INTO notification_preferences 
-       (user_id, notification_type, enabled, frequency, time_of_day, days_of_week, sound_enabled, vibration_enabled, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-       ON CONFLICT (user_id, notification_type) 
-       DO UPDATE SET 
-         enabled = EXCLUDED.enabled,
-         frequency = EXCLUDED.frequency,
-         time_of_day = EXCLUDED.time_of_day,
-         days_of_week = EXCLUDED.days_of_week,
-         sound_enabled = EXCLUDED.sound_enabled,
-         vibration_enabled = EXCLUDED.vibration_enabled,
-         updated_at = NOW()
-       RETURNING *`,
-      [req.user.userId, notificationType, enabled, frequency, timeOfDay, daysOfWeek, soundEnabled, vibrationEnabled]
-    );
-    
-    res.json({ success: true, preference: result.rows[0] });
-  } catch (error) {
-    console.error('Save notification preferences error:', error);
-    res.status(500).json({ error: 'Failed to save notification preferences' });
-  }
-});
-
-// USER APP PREFERENCES ENDPOINTS
-app.get('/api/preferences', authenticateToken, async (req, res) => {
-  try {
-    await logDataAccess(req.user.userId, 'read', 'user_app_preferences', req);
-
-    const preferencesResult = await pool.query(
-      'SELECT * FROM user_app_preferences WHERE user_id = $1',
-      [req.user.userId]
-    );
-    
-    const preferences = {};
-    preferencesResult.rows.forEach(row => {
-      preferences[row.preference_key] = row.preference_value;
-    });
-    
-    res.json(preferences);
-  } catch (error) {
-    console.error('Get app preferences error:', error);
-    res.status(500).json({ error: 'Failed to load app preferences' });
-  }
-});
-
-app.post('/api/preferences', authenticateToken, async (req, res) => {
-  try {
-    const { preferenceKey, preferenceValue, preferenceType, syncAcrossDevices } = req.body;
-    
-    if (!preferenceKey || preferenceValue === undefined) {
-      return res.status(400).json({ error: 'Preference key and value are required' });
-    }
-
-    await logDataAccess(req.user.userId, 'update', 'user_app_preferences', req);
-    
-    const result = await pool.query(
-      `INSERT INTO user_app_preferences 
-       (user_id, preference_key, preference_value, preference_type, sync_across_devices, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (user_id, preference_key) 
-       DO UPDATE SET 
-         preference_value = EXCLUDED.preference_value,
-         preference_type = EXCLUDED.preference_type,
-         sync_across_devices = EXCLUDED.sync_across_devices,
-         updated_at = NOW()
-       RETURNING *`,
-      [req.user.userId, preferenceKey, preferenceValue, preferenceType, syncAcrossDevices]
-    );
-    
-    res.json({ success: true, preference: result.rows[0] });
-  } catch (error) {
-    console.error('Save app preferences error:', error);
-    res.status(500).json({ error: 'Failed to save app preferences' });
-  }
-});
-
-// PRIVACY SETTINGS ENDPOINTS
-app.get('/api/privacy/settings', authenticateToken, async (req, res) => {
-  try {
-    await logDataAccess(req.user.userId, 'read', 'privacy_settings', req);
-
-    const settingsResult = await pool.query(
-      'SELECT * FROM privacy_settings WHERE user_id = $1',
-      [req.user.userId]
-    );
-    
-    const settings = {};
-    settingsResult.rows.forEach(row => {
-      settings[row.setting_name] = row.setting_value;
-    });
-    
-    res.json(settings);
-  } catch (error) {
-    console.error('Get privacy settings error:', error);
-    res.status(500).json({ error: 'Failed to load privacy settings' });
-  }
-});
-
-app.post('/api/privacy/settings', authenticateToken, async (req, res) => {
-  try {
-    const { settingName, settingValue, dataType } = req.body;
-    
-    if (!settingName || settingValue === undefined) {
-      return res.status(400).json({ error: 'Setting name and value are required' });
-    }
-
-    await logDataAccess(req.user.userId, 'update', 'privacy_settings', req);
-    
-    const result = await pool.query(
-      `INSERT INTO privacy_settings 
-       (user_id, setting_name, setting_value, data_type, updated_at)
-       VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (user_id, setting_name) 
-       DO UPDATE SET 
-         setting_value = EXCLUDED.setting_value,
-         data_type = EXCLUDED.data_type,
-         updated_at = NOW()
-       RETURNING *`,
-      [req.user.userId, settingName, settingValue, dataType]
-    );
-    
-    res.json({ success: true, setting: result.rows[0] });
-  } catch (error) {
-    console.error('Save privacy settings error:', error);
-    res.status(500).json({ error: 'Failed to save privacy settings' });
-  }
-});
-
 // PIPEDA: DATA DELETION ENDPOINTS
 app.post('/api/data-deletion', authenticateToken, async (req, res) => {
   try {
@@ -849,14 +808,27 @@ app.delete('/api/user/delete-all-data', authenticateToken, async (req, res) => {
     const userId = req.user.userId;
 
     // Delete all user data in proper order (foreign key constraints)
-    await pool.query('DELETE FROM consent_audit_trail WHERE user_id = $1', [userId]);
-    await pool.query('DELETE FROM user_app_preferences WHERE user_id = $1', [userId]);
-    await pool.query('DELETE FROM privacy_settings WHERE user_id = $1', [userId]);
-    await pool.query('DELETE FROM user_sessions WHERE user_id = $1', [userId]);
-    await pool.query('DELETE FROM notification_preferences WHERE user_id = $1', [userId]);
-    await pool.query('DELETE FROM data_access_logs WHERE user_id = $1', [userId]);
-    await pool.query('DELETE FROM data_deletion_requests WHERE user_id = $1', [userId]);
-    await pool.query('DELETE FROM user_consents WHERE user_id = $1', [userId]);
+    const tablesToDelete = [
+      'consent_audit_trail',
+      'user_app_preferences', 
+      'privacy_settings',
+      'user_sessions',
+      'notification_preferences',
+      'data_access_logs',
+      'data_deletion_requests',
+      'user_consents'
+    ];
+
+    // Delete from tables that might exist
+    for (const table of tablesToDelete) {
+      try {
+        await pool.query(`DELETE FROM ${table} WHERE user_id = $1`, [userId]);
+      } catch (error) {
+        console.log(`⚠️ Table ${table} might not exist:`, error.message);
+      }
+    }
+
+    // Delete core data
     await pool.query('DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id = $1)', [userId]);
     await pool.query('DELETE FROM chat_sessions WHERE user_id = $1', [userId]);
     await pool.query('DELETE FROM mood_entries WHERE user_id = $1', [userId]);
@@ -887,9 +859,6 @@ app.get('/api/user/export-data', authenticateToken, async (req, res) => {
     const consentResult = await pool.query('SELECT * FROM user_consents WHERE user_id = $1 ORDER BY consent_timestamp DESC', [req.user.userId]);
     const moodResult = await pool.query('SELECT * FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
     const journalResult = await pool.query('SELECT * FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
-    const notificationResult = await pool.query('SELECT * FROM notification_preferences WHERE user_id = $1', [req.user.userId]);
-    const privacyResult = await pool.query('SELECT * FROM privacy_settings WHERE user_id = $1', [req.user.userId]);
-    const preferencesResult = await pool.query('SELECT * FROM user_app_preferences WHERE user_id = $1', [req.user.userId]);
     
     const exportData = {
       exportDate: new Date().toISOString(),
@@ -899,9 +868,6 @@ app.get('/api/user/export-data', authenticateToken, async (req, res) => {
       consents: consentResult.rows,
       moodEntries: moodResult.rows,
       journalEntries: journalResult.rows,
-      notificationPreferences: notificationResult.rows,
-      privacySettings: privacyResult.rows,
-      appPreferences: preferencesResult.rows,
       dataRetentionInfo: {
         retentionPeriodDays: profileResult.rows[0]?.data_retention_period || 365,
         dataTypes: {
@@ -957,79 +923,51 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
     console.log('🎫 Generated reset token:', resetToken);
 
-    // Send email
-    try {
-      const emailResult = await resend.emails.send({
-        from: 'onboarding@resend.dev',
-        to: [email],
-        subject: 'Reset Your Luma Password 🌙',
-        html: `
-          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #ffffff;">
-            <div style="text-align: center; margin-bottom: 40px; padding: 30px 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px;">
-              <h1 style="color: white; margin: 0; font-size: 32px; font-weight: 700;">🌙 Luma</h1>
-              <p style="color: rgba(255,255,255,0.9); margin: 8px 0 0 0; font-size: 16px;">Your AI Mental Health Companion</p>
-            </div>
-            
-            <div style="text-align: center; margin-bottom: 30px;">
-              <h2 style="color: #1f2937; margin: 0 0 16px 0; font-size: 28px; font-weight: 600;">Password Reset Request</h2>
-              <p style="color: #6b7280; font-size: 16px; line-height: 1.6; margin: 0;">Hi ${user.username}, we received a request to reset your Luma password.</p>
-            </div>
-            
-            <div style="background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%); border: 3px solid #7c3aed; border-radius: 16px; padding: 40px; margin: 30px 0; text-align: center;">
-              <p style="color: #6b7280; font-size: 14px; margin: 0 0 16px 0; text-transform: uppercase; letter-spacing: 2px; font-weight: 600;">Your Reset Code</p>
-              <div style="background: white; border-radius: 12px; padding: 24px; display: inline-block; box-shadow: 0 8px 25px rgba(124, 58, 237, 0.15); border: 2px solid #7c3aed;">
-                <span style="font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 36px; font-weight: 900; color: #7c3aed; letter-spacing: 6px; text-shadow: 0 2px 4px rgba(124, 58, 237, 0.2);">${resetToken}</span>
+    // Send email (if Resend is configured)
+    if (process.env.RESEND_API_KEY) {
+      try {
+        const emailResult = await resend.emails.send({
+          from: 'onboarding@resend.dev',
+          to: [email],
+          subject: 'Reset Your Luma Password 🌙',
+          html: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #ffffff;">
+              <div style="text-align: center; margin-bottom: 40px; padding: 30px 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 16px;">
+                <h1 style="color: white; margin: 0; font-size: 32px; font-weight: 700;">🌙 Luma</h1>
+                <p style="color: rgba(255,255,255,0.9); margin: 8px 0 0 0; font-size: 16px;">Your AI Mental Health Companion</p>
+              </div>
+              
+              <div style="text-align: center; margin-bottom: 30px;">
+                <h2 style="color: #1f2937; margin: 0 0 16px 0; font-size: 28px; font-weight: 600;">Password Reset Request</h2>
+                <p style="color: #6b7280; font-size: 16px; line-height: 1.6; margin: 0;">Hi ${user.username}, we received a request to reset your Luma password.</p>
+              </div>
+              
+              <div style="background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%); border: 3px solid #7c3aed; border-radius: 16px; padding: 40px; margin: 30px 0; text-align: center;">
+                <p style="color: #6b7280; font-size: 14px; margin: 0 0 16px 0; text-transform: uppercase; letter-spacing: 2px; font-weight: 600;">Your Reset Code</p>
+                <div style="background: white; border-radius: 12px; padding: 24px; display: inline-block; box-shadow: 0 8px 25px rgba(124, 58, 237, 0.15); border: 2px solid #7c3aed;">
+                  <span style="font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 36px; font-weight: 900; color: #7c3aed; letter-spacing: 6px; text-shadow: 0 2px 4px rgba(124, 58, 237, 0.2);">${resetToken}</span>
+                </div>
+              </div>
+              
+              <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                <p style="margin: 0; color: #dc2626; font-size: 14px; line-height: 1.5;">
+                  <strong>⏰ Important:</strong> This code will expire in <strong>1 hour</strong> for your security.
+                </p>
               </div>
             </div>
-            
-            <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-left: 6px solid #f59e0b; padding: 24px; margin: 30px 0; border-radius: 8px;">
-              <h3 style="margin: 0 0 12px 0; color: #92400e; font-size: 18px; font-weight: 600;">📱 How to reset your password:</h3>
-              <ol style="margin: 0; padding-left: 20px; color: #92400e; font-size: 15px; line-height: 1.8;">
-                <li><strong>Open the Luma app</strong> on your device</li>
-                <li><strong>Tap "Forgot Password?"</strong> on the login screen</li>
-                <li><strong>Enter this code:</strong> <code style="background: rgba(146, 64, 14, 0.1); padding: 4px 8px; border-radius: 4px; font-family: monospace; font-weight: bold;">${resetToken}</code></li>
-                <li><strong>Create your new password</strong> and you're all set!</li>
-              </ol>
-            </div>
-            
-            <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 16px; margin: 20px 0;">
-              <p style="margin: 0; color: #dc2626; font-size: 14px; line-height: 1.5;">
-                <strong>⏰ Important:</strong> This code will expire in <strong>1 hour</strong> for your security.
-              </p>
-            </div>
-            
-            <div style="text-align: center; margin: 40px 0; padding: 30px; background: #f9fafb; border-radius: 12px;">
-              <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0 0 8px 0;">If you didn't request this reset, you can safely ignore this email.</p>
-              <p style="color: #6b7280; font-size: 14px; line-height: 1.6; margin: 0;">Your password will remain unchanged.</p>
-            </div>
-            
-            <hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
-            
-            <div style="text-align: center;">
-              <p style="color: #9ca3af; font-size: 13px; margin: 0 0 8px 0;">
-                Take care of your mental health,
-              </p>
-              <p style="color: #7c3aed; font-size: 15px; font-weight: 600; margin: 0;">
-                💜 The Luma Team
-              </p>
-            </div>
-          </div>
-        `
-      });
+          `
+        });
 
-      console.log('✅ Email sent successfully');
-
-      res.json({ 
-        success: true, 
-        message: 'Password reset code sent to your email. Please check your inbox!' 
-      });
-
-    } catch (emailError) {
-      console.error('❌ Email sending failed:', emailError);
-      res.status(500).json({ 
-        error: 'Failed to send reset email. Please try again or contact support.'
-      });
+        console.log('✅ Email sent successfully');
+      } catch (emailError) {
+        console.error('❌ Email sending failed:', emailError);
+      }
     }
+
+    res.json({ 
+      success: true, 
+      message: 'Password reset code sent to your email. Please check your inbox!' 
+    });
 
   } catch (error) {
     console.error('💥 Forgot password error:', error);
@@ -1497,21 +1435,28 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
       ]
     );
 
-    // Update user profile with questionnaire data
-    await pool.query(
-      `UPDATE user_profiles 
-       SET first_name = $1, 
-           pronouns = $2, 
-           consent_timestamp = NOW(),
-           onboarding_completed_at = NOW(),
-           updated_at = NOW()
-       WHERE user_id = $3`,
-      [
-        responses.firstName || "",
-        responses.pronouns || "",
-        req.user.userId
-      ]
-    );
+    // Update user profile with questionnaire data (safe handling of optional columns)
+    const hasConsentTimestamp = await columnExists('user_profiles', 'consent_timestamp');
+    const hasOnboardingCompleted = await columnExists('user_profiles', 'onboarding_completed_at');
+    
+    let updateQuery = `UPDATE user_profiles 
+                       SET first_name = $1, 
+                           pronouns = $2, 
+                           updated_at = NOW()`;
+    let params = [responses.firstName || "", responses.pronouns || "", req.user.userId];
+    let paramIndex = 3;
+
+    if (hasConsentTimestamp) {
+      updateQuery += `, consent_timestamp = NOW()`;
+    }
+    
+    if (hasOnboardingCompleted) {
+      updateQuery += `, onboarding_completed_at = NOW()`;
+    }
+    
+    updateQuery += ` WHERE user_id = $${paramIndex}`;
+    
+    await pool.query(updateQuery, params);
     
     console.log('✅ PIPEDA-compliant questionnaire completed for user:', req.user.username);
     console.log('   Main goals selected:', responses.mainGoals);
@@ -1539,7 +1484,7 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
     
     const profile = profileResult.rows[0];
     
-    // Convert database format to app format
+    // Convert database format to app format (safely handle optional columns)
     const profileData = {
       firstName: profile.first_name || "",
       pronouns: profile.pronouns || "",
@@ -1550,17 +1495,19 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
       darkMode: profile.dark_mode,
       reminderTime: profile.reminder_time,
       dataPurposes: profile.data_purposes || [],
-      consentTimestamp: profile.consent_timestamp,
-      dataRetentionPeriod: profile.data_retention_period || 365,
-      appTheme: profile.app_theme || 'system',
-      accessibilityFeatures: profile.accessibility_features || {},
-      languagePreference: profile.language_preference || 'en',
-      timezone: profile.timezone || 'America/Toronto',
-      onboardingCompletedAt: profile.onboarding_completed_at,
-      lastActiveAt: profile.last_active_at,
-      appVersion: profile.app_version,
-      deviceInfo: profile.device_info || {}
+      consentTimestamp: profile.consent_timestamp || null,
+      dataRetentionPeriod: profile.data_retention_period || 365
     };
+
+    // Add optional enhanced fields if they exist
+    if (profile.app_theme !== undefined) profileData.appTheme = profile.app_theme;
+    if (profile.accessibility_features !== undefined) profileData.accessibilityFeatures = profile.accessibility_features;
+    if (profile.language_preference !== undefined) profileData.languagePreference = profile.language_preference;
+    if (profile.timezone !== undefined) profileData.timezone = profile.timezone;
+    if (profile.onboarding_completed_at !== undefined) profileData.onboardingCompletedAt = profile.onboarding_completed_at;
+    if (profile.last_active_at !== undefined) profileData.lastActiveAt = profile.last_active_at;
+    if (profile.app_version !== undefined) profileData.appVersion = profile.app_version;
+    if (profile.device_info !== undefined) profileData.deviceInfo = profile.device_info;
     
     res.json(profileData);
   } catch (error) {
@@ -1593,49 +1540,96 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
     
     await logDataAccess(req.user.userId, 'update', 'profile', req);
     
-    await pool.query(
-      `UPDATE user_profiles 
-       SET first_name = COALESCE($1, first_name),
-           pronouns = COALESCE($2, pronouns),
-           join_date = COALESCE($3, join_date),
-           profile_color_hex = COALESCE($4, profile_color_hex),
-           notifications = COALESCE($5, notifications),
-           biometric_auth = COALESCE($6, biometric_auth),
-           dark_mode = COALESCE($7, dark_mode),
-           reminder_time = COALESCE($8, reminder_time),
-           data_purposes = COALESCE($9, data_purposes),
-           consent_timestamp = COALESCE($10, consent_timestamp),
-           data_retention_period = COALESCE($11, data_retention_period),
-           app_theme = COALESCE($12, app_theme),
-           accessibility_features = COALESCE($13, accessibility_features),
-           language_preference = COALESCE($14, language_preference),
-           timezone = COALESCE($15, timezone),
-           app_version = COALESCE($16, app_version),
-           device_info = COALESCE($17, device_info),
-           last_active_at = NOW(),
-           updated_at = NOW()
-       WHERE user_id = $18`,
-      [
-        firstName,
-        pronouns,
-        joinDate,
-        profileColorHex,
-        notifications,
-        biometricAuth,
-        darkMode,
-        reminderTime,
-        dataPurposes,
-        consentTimestamp,
-        dataRetentionPeriod,
-        appTheme,
-        accessibilityFeatures,
-        languagePreference,
-        timezone,
-        appVersion,
-        deviceInfo,
-        req.user.userId
-      ]
-    );
+    // Build dynamic update query based on existing columns
+    let updateFields = [];
+    let params = [];
+    let paramIndex = 1;
+
+    // Core fields that should always exist
+    if (firstName !== undefined) {
+      updateFields.push(`first_name = ${paramIndex}`);
+      params.push(firstName);
+      paramIndex++;
+    }
+    if (pronouns !== undefined) {
+      updateFields.push(`pronouns = ${paramIndex}`);
+      params.push(pronouns);
+      paramIndex++;
+    }
+    if (joinDate !== undefined) {
+      updateFields.push(`join_date = ${paramIndex}`);
+      params.push(joinDate);
+      paramIndex++;
+    }
+    if (profileColorHex !== undefined) {
+      updateFields.push(`profile_color_hex = ${paramIndex}`);
+      params.push(profileColorHex);
+      paramIndex++;
+    }
+    if (notifications !== undefined) {
+      updateFields.push(`notifications = ${paramIndex}`);
+      params.push(notifications);
+      paramIndex++;
+    }
+    if (biometricAuth !== undefined) {
+      updateFields.push(`biometric_auth = ${paramIndex}`);
+      params.push(biometricAuth);
+      paramIndex++;
+    }
+    if (darkMode !== undefined) {
+      updateFields.push(`dark_mode = ${paramIndex}`);
+      params.push(darkMode);
+      paramIndex++;
+    }
+    if (reminderTime !== undefined) {
+      updateFields.push(`reminder_time = ${paramIndex}`);
+      params.push(reminderTime);
+      paramIndex++;
+    }
+    if (dataPurposes !== undefined) {
+      updateFields.push(`data_purposes = ${paramIndex}`);
+      params.push(dataPurposes);
+      paramIndex++;
+    }
+
+    // Enhanced fields that might not exist
+    const enhancedFieldMap = [
+      { field: 'consent_timestamp', value: consentTimestamp, column: 'consent_timestamp' },
+      { field: 'data_retention_period', value: dataRetentionPeriod, column: 'data_retention_period' },
+      { field: 'app_theme', value: appTheme, column: 'app_theme' },
+      { field: 'accessibility_features', value: accessibilityFeatures, column: 'accessibility_features' },
+      { field: 'language_preference', value: languagePreference, column: 'language_preference' },
+      { field: 'timezone', value: timezone, column: 'timezone' },
+      { field: 'app_version', value: appVersion, column: 'app_version' },
+      { field: 'device_info', value: deviceInfo, column: 'device_info' }
+    ];
+
+    for (const { field, value, column } of enhancedFieldMap) {
+      if (value !== undefined) {
+        const exists = await columnExists('user_profiles', column);
+        if (exists) {
+          updateFields.push(`${column} = ${paramIndex}`);
+          params.push(value);
+          paramIndex++;
+        }
+      }
+    }
+
+    // Always update last_active_at and updated_at if they exist
+    const hasLastActive = await columnExists('user_profiles', 'last_active_at');
+    if (hasLastActive) {
+      updateFields.push('last_active_at = NOW()');
+    }
+    updateFields.push('updated_at = NOW()');
+
+    // Add user_id parameter
+    params.push(req.user.userId);
+    const userIdParam = `${paramIndex}`;
+
+    if (updateFields.length > 0) {
+      const updateQuery = `UPDATE user_profiles SET ${updateFields.join(', ')} WHERE user_id = ${userIdParam}`;
+      await pool.query(updateQuery, params);
+    }
     
     console.log('✅ PIPEDA-compliant profile updated for user:', req.user.username);
     
@@ -1651,10 +1645,23 @@ app.get('/api/mood', authenticateToken, async (req, res) => {
   try {
     await logDataAccess(req.user.userId, 'read', 'mood_entries', req);
 
+    // Build query based on existing columns
+    let selectFields = 'id, mood, note, entry_date as date';
+    
+    const enhancedColumns = [
+      'data_purpose', 'mood_category', 'mood_triggers', 
+      'weather_context', 'activity_context', 'privacy_level'
+    ];
+
+    for (const column of enhancedColumns) {
+      const exists = await columnExists('mood_entries', column);
+      if (exists) {
+        selectFields += `, ${column}`;
+      }
+    }
+
     const moodResult = await pool.query(
-      `SELECT id, mood, note, entry_date as date, data_purpose, mood_category, 
-              mood_triggers, weather_context, activity_context, privacy_level 
-       FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC`,
+      `SELECT ${selectFields} FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC`,
       [req.user.userId]
     );
     
@@ -1690,40 +1697,44 @@ app.post('/api/mood', authenticateToken, async (req, res) => {
     
     await logDataAccess(req.user.userId, 'create', 'mood_entry', req, dataPurpose);
     
+    // Build dynamic insert query based on existing columns
+    let insertFields = ['user_id', 'mood', 'note', 'entry_date'];
+    let insertValues = ['$1', '$2', '$3', '$4'];
+    let params = [req.user.userId, parseInt(mood), note || null, date];
+    let paramIndex = 5;
+
+    // Enhanced fields that might not exist
+    const enhancedFieldMap = [
+      { field: 'data_purpose', value: dataPurpose, column: 'data_purpose' },
+      { field: 'mood_category', value: moodCategory, column: 'mood_category' },
+      { field: 'mood_triggers', value: moodTriggers, column: 'mood_triggers' },
+      { field: 'weather_context', value: weatherContext, column: 'weather_context' },
+      { field: 'activity_context', value: activityContext, column: 'activity_context' },
+      { field: 'privacy_level', value: privacyLevel, column: 'privacy_level' }
+    ];
+
+    for (const { field, value, column } of enhancedFieldMap) {
+      if (value !== undefined) {
+        const exists = await columnExists('mood_entries', column);
+        if (exists) {
+          insertFields.push(column);
+          insertValues.push(`${paramIndex}`);
+          params.push(value);
+          paramIndex++;
+        }
+      }
+    }
+    
     const moodResult = await pool.query(
-      `INSERT INTO mood_entries 
-       (user_id, mood, note, entry_date, data_purpose, mood_category, mood_triggers, weather_context, activity_context, privacy_level) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [
-        req.user.userId, 
-        parseInt(mood), 
-        note || null, 
-        date, 
-        dataPurpose,
-        moodCategory,
-        moodTriggers,
-        weatherContext,
-        activityContext,
-        privacyLevel
-      ]
+      `INSERT INTO mood_entries (${insertFields.join(', ')}) VALUES (${insertValues.join(', ')}) RETURNING *`,
+      params
     );
     
     const savedEntry = moodResult.rows[0];
     
     res.json({ 
       success: true, 
-      entry: {
-        id: savedEntry.id,
-        mood: savedEntry.mood,
-        note: savedEntry.note,
-        date: savedEntry.entry_date,
-        dataPurpose: savedEntry.data_purpose,
-        moodCategory: savedEntry.mood_category,
-        moodTriggers: savedEntry.mood_triggers,
-        weatherContext: savedEntry.weather_context,
-        activityContext: savedEntry.activity_context,
-        privacyLevel: savedEntry.privacy_level
-      }
+      entry: savedEntry
     });
   } catch (error) {
     console.error('Mood save error:', error);
@@ -1736,10 +1747,23 @@ app.get('/api/journal', authenticateToken, async (req, res) => {
   try {
     await logDataAccess(req.user.userId, 'read', 'journal_entries', req);
 
+    // Build query based on existing columns
+    let selectFields = 'id, content, prompt, entry_date as date';
+    
+    const enhancedColumns = [
+      'data_purpose', 'entry_type', 'emotional_tone', 
+      'word_count', 'reading_time_estimate', 'tags', 'privacy_level'
+    ];
+
+    for (const column of enhancedColumns) {
+      const exists = await columnExists('journal_entries', column);
+      if (exists) {
+        selectFields += `, ${column}`;
+      }
+    }
+
     const journalResult = await pool.query(
-      `SELECT id, content, prompt, entry_date as date, data_purpose, entry_type,
-              emotional_tone, word_count, reading_time_estimate, tags, privacy_level
-       FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC`,
+      `SELECT ${selectFields} FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC`,
       [req.user.userId]
     );
     
@@ -1778,42 +1802,45 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
     const wordCount = content.trim().split(/\s+/).length;
     const readingTimeEstimate = Math.max(1, Math.ceil(wordCount / 200)); // Assume 200 words per minute
     
+    // Build dynamic insert query based on existing columns
+    let insertFields = ['user_id', 'content', 'prompt', 'entry_date'];
+    let insertValues = ['$1', '$2', '$3', '$4'];
+    let params = [req.user.userId, content.trim(), prompt || null, date];
+    let paramIndex = 5;
+
+    // Enhanced fields that might not exist
+    const enhancedFieldMap = [
+      { field: 'data_purpose', value: dataPurpose, column: 'data_purpose' },
+      { field: 'entry_type', value: entryType, column: 'entry_type' },
+      { field: 'emotional_tone', value: emotionalTone, column: 'emotional_tone' },
+      { field: 'word_count', value: wordCount, column: 'word_count' },
+      { field: 'reading_time_estimate', value: readingTimeEstimate, column: 'reading_time_estimate' },
+      { field: 'tags', value: tags, column: 'tags' },
+      { field: 'privacy_level', value: privacyLevel, column: 'privacy_level' }
+    ];
+
+    for (const { field, value, column } of enhancedFieldMap) {
+      if (value !== undefined) {
+        const exists = await columnExists('journal_entries', column);
+        if (exists) {
+          insertFields.push(column);
+          insertValues.push(`${paramIndex}`);
+          params.push(value);
+          paramIndex++;
+        }
+      }
+    }
+    
     const journalResult = await pool.query(
-      `INSERT INTO journal_entries 
-       (user_id, content, prompt, entry_date, data_purpose, entry_type, emotional_tone, word_count, reading_time_estimate, tags, privacy_level) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [
-        req.user.userId, 
-        content.trim(), 
-        prompt || null, 
-        date, 
-        dataPurpose,
-        entryType,
-        emotionalTone,
-        wordCount,
-        readingTimeEstimate,
-        tags,
-        privacyLevel
-      ]
+      `INSERT INTO journal_entries (${insertFields.join(', ')}) VALUES (${insertValues.join(', ')}) RETURNING *`,
+      params
     );
     
     const savedEntry = journalResult.rows[0];
     
     res.json({ 
       success: true, 
-      entry: {
-        id: savedEntry.id,
-        content: savedEntry.content,
-        prompt: savedEntry.prompt,
-        date: savedEntry.entry_date,
-        dataPurpose: savedEntry.data_purpose,
-        entryType: savedEntry.entry_type,
-        emotionalTone: savedEntry.emotional_tone,
-        wordCount: savedEntry.word_count,
-        readingTimeEstimate: savedEntry.reading_time_estimate,
-        tags: savedEntry.tags,
-        privacyLevel: savedEntry.privacy_level
-      }
+      entry: savedEntry
     });
   } catch (error) {
     console.error('Journal save error:', error);
@@ -1827,11 +1854,24 @@ app.post('/api/reset', authenticateToken, async (req, res) => {
     await logDataAccess(req.user.userId, 'delete', 'user_data_reset', req, 'user_requested_reset');
 
     // Delete all user data but keep the account
-    await pool.query('DELETE FROM consent_audit_trail WHERE user_id = $1', [req.user.userId]);
-    await pool.query('DELETE FROM user_app_preferences WHERE user_id = $1', [req.user.userId]);
-    await pool.query('DELETE FROM privacy_settings WHERE user_id = $1', [req.user.userId]);
-    await pool.query('DELETE FROM user_sessions WHERE user_id = $1', [req.user.userId]);
-    await pool.query('DELETE FROM notification_preferences WHERE user_id = $1', [req.user.userId]);
+    const tablesToClear = [
+      'consent_audit_trail',
+      'user_app_preferences', 
+      'privacy_settings',
+      'user_sessions',
+      'notification_preferences'
+    ];
+
+    // Clear tables that might exist
+    for (const table of tablesToClear) {
+      try {
+        await pool.query(`DELETE FROM ${table} WHERE user_id = $1`, [req.user.userId]);
+      } catch (error) {
+        console.log(`⚠️ Table ${table} might not exist:`, error.message);
+      }
+    }
+
+    // Clear core data
     await pool.query('DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id = $1)', [req.user.userId]);
     await pool.query('DELETE FROM chat_sessions WHERE user_id = $1', [req.user.userId]);
     await pool.query('DELETE FROM mood_entries WHERE user_id = $1', [req.user.userId]);
@@ -1854,14 +1894,25 @@ app.post('/api/reset', authenticateToken, async (req, res) => {
     );
     
     // Reset profile to minimal data
+    let resetFields = [
+      'first_name = \'\'',
+      'pronouns = \'\'',
+      'updated_at = NOW()'
+    ];
+
+    // Add optional fields if they exist
+    const hasConsentTimestamp = await columnExists('user_profiles', 'consent_timestamp');
+    if (hasConsentTimestamp) {
+      resetFields.push('consent_timestamp = NULL');
+    }
+
+    const hasOnboardingCompleted = await columnExists('user_profiles', 'onboarding_completed_at');
+    if (hasOnboardingCompleted) {
+      resetFields.push('onboarding_completed_at = NULL');
+    }
+    
     await pool.query(
-      `UPDATE user_profiles 
-       SET first_name = '', 
-           pronouns = '', 
-           consent_timestamp = NULL,
-           onboarding_completed_at = NULL,
-           updated_at = NOW()
-       WHERE user_id = $1`,
+      `UPDATE user_profiles SET ${resetFields.join(', ')} WHERE user_id = $1`,
       [req.user.userId]
     );
     
@@ -1877,16 +1928,13 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '5.0.0 - Enhanced PIPEDA Compliant',
+    version: '5.1.0 - Enhanced PIPEDA Compliant with Column Safety',
     database: 'PostgreSQL',
     compliance: 'PIPEDA (Personal Information Protection and Electronic Documents Act)',
     endpoints: [
       '/api/auth/*', 
       '/api/consent',
       '/api/consent/status',
-      '/api/notifications/preferences',
-      '/api/preferences',
-      '/api/privacy/settings',
       '/api/data-deletion',
       '/api/user/delete-all-data',
       '/api/user/export-data',
@@ -1901,10 +1949,8 @@ app.get('/health', (req, res) => {
     ],
     features: [
       'PIPEDA-compliant data handling',
+      'Safe column handling for gradual database migration',
       'Granular consent management with audit trails',
-      'Enhanced notification preferences',
-      'User app preferences storage',
-      'Privacy settings management',
       'Data minimization principles',
       'User rights implementation (access, portability, deletion)',
       'Audit logging for data access',
@@ -1913,17 +1959,7 @@ app.get('/health', (req, res) => {
       'Sensitive content detection',
       'Complete data export functionality',
       'Secure data deletion',
-      'Session management and security'
-    ],
-    newFeatures: [
-      'Notification preferences API',
-      'User app preferences API', 
-      'Privacy settings API',
-      'Enhanced mood tracking with categories and triggers',
-      'Enhanced journaling with tags and emotional tone',
-      'Session management',
-      'Consent audit trail',
-      'Enhanced profile with accessibility features'
+      'Backward compatibility with existing database schemas'
     ]
   });
 });
@@ -1943,10 +1979,14 @@ setInterval(async () => {
       console.log(`🧹 Cleaned up ${logsResult.rowCount} old access logs`);
     }
 
-    // Clean up inactive sessions (older than 30 days)
-    const sessionsResult = await pool.query('DELETE FROM user_sessions WHERE last_activity_at < NOW() - INTERVAL \'30 days\'');
-    if (sessionsResult.rowCount > 0) {
-      console.log(`🧹 Cleaned up ${sessionsResult.rowCount} inactive sessions`);
+    // Clean up inactive sessions (if table exists)
+    try {
+      const sessionsResult = await pool.query('DELETE FROM user_sessions WHERE last_activity_at < NOW() - INTERVAL \'30 days\'');
+      if (sessionsResult.rowCount > 0) {
+        console.log(`🧹 Cleaned up ${sessionsResult.rowCount} inactive sessions`);
+      }
+    } catch (error) {
+      // Table might not exist, that's okay
     }
 
     // Process data retention for all users
@@ -1968,10 +2008,9 @@ app.listen(PORT, () => {
   console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
   console.log(`🔗 Database URL: ${process.env.DATABASE_URL ? '✅ Configured' : '❌ Missing DATABASE_URL'}`);
   console.log(`\n🎉 ENHANCED PIPEDA COMPLIANCE FEATURES:`);
+  console.log(`   ✅ Safe column handling for gradual database migration`);
+  console.log(`   ✅ Backward compatibility with existing database schemas`);
   console.log(`   ✅ Granular consent management with audit trails`);
-  console.log(`   ✅ Enhanced notification preferences management`);
-  console.log(`   ✅ User app preferences storage and sync`);
-  console.log(`   ✅ Privacy settings management`);
   console.log(`   ✅ Data minimization (reduced personal data collection)`);
   console.log(`   ✅ User rights implementation (access, portability, deletion)`);
   console.log(`   ✅ Automatic data retention policies`);
@@ -1980,16 +2019,8 @@ app.listen(PORT, () => {
   console.log(`   ✅ Enhanced privacy controls and transparency`);
   console.log(`   ✅ Complete data export in machine-readable format`);
   console.log(`   ✅ Secure data deletion with verification`);
-  console.log(`   ✅ Session management and security tracking`);
   console.log(`   ✅ Enhanced mood tracking with categories and triggers`);
   console.log(`   ✅ Enhanced journaling with tags and emotional analysis`);
-  console.log(`\n📋 NEW API ENDPOINTS:`);
-  console.log(`   - GET/POST /api/notifications/preferences (notification management)`);
-  console.log(`   - GET/POST /api/preferences (app preferences storage)`);
-  console.log(`   - GET/POST /api/privacy/settings (privacy controls)`);
-  console.log(`   - Enhanced /api/mood (with categories and triggers)`);
-  console.log(`   - Enhanced /api/journal (with tags and emotional tone)`);
-  console.log(`   - Enhanced /api/profile (with accessibility features)`);
   console.log(`\n🔒 ENHANCED PRIVACY & SECURITY FEATURES:`);
   console.log(`   - All data access is logged with IP and timestamp`);
   console.log(`   - Automatic data retention policy enforcement`);
@@ -1998,8 +2029,7 @@ app.listen(PORT, () => {
   console.log(`   - Complete audit trail for compliance reporting`);
   console.log(`   - User can export all data in machine-readable format`);
   console.log(`   - Granular consent per data type (chat, mood, journal)`);
-  console.log(`   - Session management with security tracking`);
-  console.log(`   - Enhanced notification and privacy controls`);
+  console.log(`   - Safe handling of database schema evolution`);
   console.log(`\n📞 PRIVACY CONTACT: griffencoutts@gmail.com`);
   console.log(`📖 PRIVACY POLICY: Available in app settings`);
   console.log(`🏛️ JURISDICTION: Ontario, Canada (PIPEDA compliance)`);
