@@ -418,7 +418,497 @@ async function initializeDatabase() {
     `);
 
     // Add missing data_purpose column to journal_entries
-    const journalDataPurposeExists = await columnExists('journal_entries', 'data_purpose');
+    const journalResult = await pool.query(insertQuery, params);
+    
+    const savedEntry = journalResult.rows[0];
+    console.log('✅ Journal entry saved successfully:', savedEntry.id);
+    
+    res.json({ 
+      success: true, 
+      message: 'Journal entry saved successfully',
+      entry: savedEntry
+    });
+  } catch (error) {
+    console.error('💥 Journal save error:', error);
+    console.error('💥 Error details:', error.message);
+    console.error('💥 Error stack:', error.stack);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to save journal entry',
+      message: 'Failed to save journal entry',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// PIPEDA: Enhanced CHAT ENDPOINT with consent checking
+app.post('/api/chat', authenticateToken, async (req, res) => {
+  console.log('💬 Chat request for user:', req.user.userId);
+  
+  try {
+    const { message, chatHistory, sessionId, consentedToAI } = req.body;
+    
+    // PIPEDA: Check AI processing consent
+    if (!consentedToAI) {
+      console.log('❌ AI processing consent not given');
+      return res.status(403).json({ 
+        success: false,
+        error: 'AI processing consent required',
+        message: 'AI processing consent required',
+        requiresConsent: true 
+      });
+    }
+
+    await logDataAccess(req.user.userId, 'create', 'chat_message', req, 'ai_conversation');
+    
+    let currentSession = null;
+
+    if (sessionId) {
+      // Try to find existing session
+      const sessionResult = await pool.query(
+        'SELECT * FROM chat_sessions WHERE id = $1 AND user_id = $2',
+        [sessionId, req.user.userId]
+      );
+      
+      if (sessionResult.rows.length > 0) {
+        currentSession = sessionResult.rows[0];
+      }
+    }
+    
+    if (!currentSession) {
+      // Create new session
+      const sessionResult = await pool.query(
+        'INSERT INTO chat_sessions (user_id, start_time, last_activity, user_context) VALUES ($1, NOW(), NOW(), $2) RETURNING *',
+        [req.user.userId, JSON.stringify({ mood: null, recentJournalThemes: [], questionnaireCompleted: false })]
+      );
+      currentSession = sessionResult.rows[0];
+    }
+
+    // PIPEDA: Detect sensitive content
+    const sensitiveKeywords = ['suicide', 'self-harm', 'kill myself', 'medication', 'doctor', 'therapist', 'address', 'phone', 'social security'];
+    const containsSensitive = sensitiveKeywords.some(keyword => message.toLowerCase().includes(keyword));
+
+    // Add current user message to session
+    await pool.query(
+      'INSERT INTO chat_messages (session_id, role, content, contains_sensitive_data, timestamp) VALUES ($1, $2, $3, $4, NOW())',
+      [currentSession.id, 'user', message, containsSensitive]
+    );
+
+    // Get user context for AI
+    const questionnaireResult = await pool.query(
+      'SELECT * FROM questionnaire_responses WHERE user_id = $1',
+      [req.user.userId]
+    );
+
+    const profileResult = await pool.query(
+      'SELECT * FROM user_profiles WHERE user_id = $1',
+      [req.user.userId]
+    );
+
+    const recentMoodsResult = await pool.query(
+      'SELECT mood, entry_date FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 5',
+      [req.user.userId]
+    );
+
+    const recentJournalsResult = await pool.query(
+      'SELECT content FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 3',
+      [req.user.userId]
+    );
+
+    // Update session context
+    const userContext = {
+      mood: recentMoodsResult.rows.length > 0 ? recentMoodsResult.rows[0].mood : null,
+      recentJournalThemes: recentJournalsResult.rows.map(j => j.content.substring(0, 100)),
+      questionnaireCompleted: questionnaireResult.rows.length > 0 ? questionnaireResult.rows[0].completed : false,
+      lastMoodDate: recentMoodsResult.rows.length > 0 ? recentMoodsResult.rows[0].entry_date : null
+    };
+
+    await pool.query(
+      'UPDATE chat_sessions SET last_activity = NOW(), user_context = $1 WHERE id = $2',
+      [JSON.stringify(userContext), currentSession.id]
+    );
+
+    let questionnaireContext = '';
+    if (questionnaireResult.rows.length > 0 && questionnaireResult.rows[0].completed) {
+      const responses = questionnaireResult.rows[0];
+      questionnaireContext = `\n\nIMPORTANT USER CONTEXT (reference naturally when relevant):`;
+      
+      if (responses.first_name) {
+        questionnaireContext += `\n- Name: ${responses.first_name} (call them ${responses.first_name})`;
+      }
+      if (responses.pronouns) {
+        questionnaireContext += `\n- Pronouns: ${responses.pronouns}`;
+      }
+      
+      const goalsText = responses.main_goals && responses.main_goals.length > 0 
+        ? responses.main_goals.join(', ') 
+        : 'Not specified';
+      
+      questionnaireContext += `\n- Goals: ${goalsText}
+- Communication style: ${responses.communication_style || 'Not specified'}`;
+    }
+
+    // Build messages for OpenAI using stored session messages
+    const messages = [
+      {
+        role: 'system',
+        content: `You are Luma, a supportive AI mental health companion who has genuine, caring conversations while providing helpful insights when needed.
+
+CONVERSATION STYLE:
+- Respond like a caring, insightful friend who truly listens
+- Ask thoughtful follow-up questions to understand their full situation
+- Reflect back what you're hearing to show you understand
+- Share insights naturally within conversation, not as numbered lists
+- Be genuinely curious about their specific experience
+- Remember you're having a conversation, not giving a therapy session
+
+RESPONSE APPROACH:
+1. First, acknowledge their feelings and show understanding
+2. Ask a thoughtful follow-up question to learn more about their situation
+3. If appropriate, weave in ONE relevant insight or gentle suggestion naturally
+4. Keep the conversation flowing - focus on connection over solutions
+
+TONE: Warm, genuine, curious, supportive - like talking to someone who really cares about understanding your experience first, not just solving your problems.
+
+IMPORTANT - AVOID:
+- Numbered lists of suggestions
+- Immediately jumping to solutions before understanding
+- Generic advice without knowing their specific context
+- Sounding clinical, robotic, or overly therapeutic
+- Giving multiple strategies at once
+
+Remember: People want to feel heard and understood FIRST, then gently guided toward insights.${questionnaireContext}`
+      }
+    ];
+    
+    // Add recent conversation history from stored session (last 10 messages for context)
+    const recentMessagesResult = await pool.query(
+      'SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY timestamp DESC LIMIT 11',
+      [currentSession.id]
+    );
+
+    // Reverse to get chronological order, exclude the message we just added
+    const recentMessages = recentMessagesResult.rows.reverse().slice(0, -1);
+    recentMessages.forEach(msg => {
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        messages.push({
+          role: msg.role,
+          content: msg.content
+        });
+      }
+    });
+    
+    // Add the current message
+    messages.push({
+      role: 'user',
+      content: message
+    });
+    
+    // Call OpenAI
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: messages,
+        temperature: 0.8,
+        max_tokens: 400
+      }),
+    });
+    
+    const data = await response.json();
+    
+    if (data.choices && data.choices[0]) {
+      // Add AI response to session
+      await pool.query(
+        'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+        [currentSession.id, 'assistant', data.choices[0].message.content]
+      );
+
+      // Count messages in session
+      const messageCountResult = await pool.query(
+        'SELECT COUNT(*) as count FROM chat_messages WHERE session_id = $1',
+        [currentSession.id]
+      );
+      
+      console.log(`💬 Chat session ${currentSession.id}: ${messageCountResult.rows[0].count} messages`);
+      
+      res.json({ 
+        success: true,
+        response: data.choices[0].message.content,
+        sessionId: currentSession.id
+      });
+    } else {
+      console.error('❌ No response from OpenAI:', data);
+      res.status(500).json({ 
+        success: false,
+        error: 'No response from AI',
+        message: 'No response from AI'
+      });
+    }
+  } catch (error) {
+    console.error('💥 Chat error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Server error',
+      message: 'Server error'
+    });
+  }
+});
+
+// PIPEDA: Consent management endpoints
+app.post('/api/consent', authenticateToken, async (req, res) => {
+  try {
+    const {
+      dataCollection,
+      aiProcessing,
+      moodTracking,
+      journaling,
+      notifications,
+      dataSharing,
+      version = '1.0'
+    } = req.body;
+
+    await logDataAccess(req.user.userId, 'create', 'consent_record', req, 'consent_management');
+
+    // Insert new consent record
+    await pool.query(
+      `INSERT INTO user_consents (user_id, data_collection, ai_processing, mood_tracking, journaling, notifications, data_sharing, version, ip_address, user_agent, consent_timestamp)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+      [req.user.userId, dataCollection, aiProcessing, moodTracking, journaling, notifications, dataSharing, version, req.ip, req.get('User-Agent')]
+    );
+
+    res.json({
+      success: true,
+      message: 'Consent preferences saved successfully'
+    });
+  } catch (error) {
+    console.error('Consent save error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to save consent preferences',
+      message: 'Failed to save consent preferences'
+    });
+  }
+});
+
+app.get('/api/consent/status', authenticateToken, async (req, res) => {
+  try {
+    await logDataAccess(req.user.userId, 'read', 'consent_status', req);
+
+    const consentResult = await pool.query(
+      'SELECT * FROM user_consents WHERE user_id = $1 ORDER BY consent_timestamp DESC LIMIT 1',
+      [req.user.userId]
+    );
+
+    if (consentResult.rows.length === 0) {
+      return res.json({
+        success: true,
+        consents: {
+          dataCollection: false,
+          aiProcessing: false,
+          moodTracking: false,
+          journaling: false,
+          notifications: false,
+          dataSharing: false
+        }
+      });
+    }
+
+    const consent = consentResult.rows[0];
+    res.json({
+      success: true,
+      consents: {
+        dataCollection: consent.data_collection,
+        aiProcessing: consent.ai_processing,
+        moodTracking: consent.mood_tracking,
+        journaling: consent.journaling,
+        notifications: consent.notifications,
+        dataSharing: consent.data_sharing
+      },
+      consentTimestamp: consent.consent_timestamp,
+      version: consent.version
+    });
+  } catch (error) {
+    console.error('Consent status error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get consent status',
+      message: 'Failed to get consent status'
+    });
+  }
+});
+
+// PIPEDA: Data deletion endpoint
+app.post('/api/data-deletion', authenticateToken, async (req, res) => {
+  try {
+    const { requestType = 'complete_deletion' } = req.body;
+
+    await logDataAccess(req.user.userId, 'create', 'data_deletion_request', req, 'user_rights');
+
+    // Record the deletion request
+    await pool.query(
+      'INSERT INTO data_deletion_requests (user_id, request_type, status, requested_at) VALUES ($1, $2, $3, NOW())',
+      [req.user.userId, requestType, 'processing']
+    );
+
+    // Perform the deletion
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Delete user data in correct order (foreign key constraints)
+      await client.query('DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id = $1)', [req.user.userId]);
+      await client.query('DELETE FROM chat_sessions WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM journal_entries WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM mood_entries WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM questionnaire_responses WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM user_consents WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM data_access_logs WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM user_profiles WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [req.user.userId]);
+      
+      // Update deletion request status
+      await client.query(
+        'UPDATE data_deletion_requests SET status = $1, processed_at = NOW() WHERE user_id = $2 AND status = $3',
+        ['completed', req.user.userId, 'processing']
+      );
+
+      // Delete the user last
+      await client.query('DELETE FROM users WHERE id = $1', [req.user.userId]);
+
+      await client.query('COMMIT');
+
+      console.log(`🗑️ Complete data deletion completed for user ${req.user.userId}`);
+
+      res.json({
+        success: true,
+        message: 'All your data has been permanently deleted'
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Data deletion error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete data',
+      message: 'Failed to delete data'
+    });
+  }
+});
+
+// PIPEDA: Data export endpoint
+app.get('/api/user/export-data', authenticateToken, async (req, res) => {
+  try {
+    await logDataAccess(req.user.userId, 'read', 'complete_data_export', req, 'user_rights');
+
+    // Get all user data
+    const userData = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const profileData = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1', [req.user.userId]);
+    const moodData = await pool.query('SELECT * FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
+    const journalData = await pool.query('SELECT * FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
+    const consentData = await pool.query('SELECT * FROM user_consents WHERE user_id = $1 ORDER BY consent_timestamp DESC', [req.user.userId]);
+    const questionnaireData = await pool.query('SELECT * FROM questionnaire_responses WHERE user_id = $1', [req.user.userId]);
+
+    const exportData = {
+      exportDate: new Date().toISOString(),
+      userData: userData.rows[0] || {},
+      profile: profileData.rows[0] || {},
+      moodEntries: moodData.rows,
+      journalEntries: journalData.rows,
+      consentHistory: consentData.rows,
+      questionnaireResponses: questionnaireData.rows,
+      dataRetentionInfo: {
+        retentionPeriodDays: profileData.rows[0]?.data_retention_period || 365,
+        dataTypes: {
+          profile: "Retained for account lifetime",
+          moodEntries: "Retained according to user preferences",
+          journalEntries: "Retained according to user preferences",
+          chatHistory: "Not permanently stored"
+        }
+      }
+    };
+
+    res.json({
+      success: true,
+      data: exportData
+    });
+  } catch (error) {
+    console.error('Data export error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to export data',
+      message: 'Failed to export data'
+    });
+  }
+});
+
+// Start server with proper initialization
+const startServer = async () => {
+  try {
+    console.log('🚀 Starting Luma Backend Server...');
+    
+    // Test database connection
+    console.log('🔗 Testing database connection...');
+    const client = await pool.connect();
+    console.log('✅ Database connection successful');
+    client.release();
+    
+    // Initialize database
+    console.log('🗄️ Initializing database...');
+    await initializeDatabase();
+    console.log('✅ Database initialization complete');
+    
+    // Start the server
+    app.listen(PORT, () => {
+      console.log(`✅ Luma Enhanced Debug PIPEDA-compliant backend running on port ${PORT}`);
+      console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
+      console.log(`🗄️ Database: PostgreSQL with Enhanced Debug PIPEDA-compliant schema`);
+      console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing RESEND_API_KEY'}`);
+      console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
+      console.log(`🔗 Database URL: ${process.env.DATABASE_URL ? '✅ Configured' : '❌ Missing DATABASE_URL'}`);
+      console.log(`🔑 JWT Secret: ${JWT_SECRET !== 'your-super-secret-jwt-key-change-this' ? '✅ Configured' : '⚠️ Using default - please change'}`);
+      console.log(`\n🔥 SERVER IS READY TO HANDLE REQUESTS`);
+      console.log(`\n🎉 ENHANCED DEBUG PIPEDA COMPLIANCE FEATURES:`);
+      console.log(`   ✅ ENHANCED: Login debugging with detailed user lookup logging`);
+      console.log(`   ✅ ENHANCED: Case-insensitive username/email matching`);
+      console.log(`   ✅ ADDED: Debug endpoint /api/debug/users (dev only)`);
+      console.log(`   ✅ FIXED: SQL parameter mismatches in all queries`);
+      console.log(`   ✅ FIXED: Registration endpoint with transaction support`);
+      console.log(`   ✅ FIXED: Profile/mood/journal save operations`);
+      console.log(`   ✅ Enhanced error logging with query details`);
+      console.log(`   ✅ Improved CORS configuration`);
+      console.log(`   ✅ Consistent JSON response format`);
+      console.log(`   ✅ Safe column handling for gradual database migration`);
+      console.log(`   ✅ Backward compatibility with existing database schemas`);
+      console.log(`   ✅ Granular consent management with audit trails`);
+      console.log(`   ✅ Data minimization (reduced personal data collection)`);
+      console.log(`   ✅ User rights implementation (access, portability, deletion)`);
+      console.log(`   ✅ Automatic data retention policies`);
+      console.log(`   ✅ Comprehensive audit logging`);
+      console.log(`   ✅ Sensitive content detection and flagging`);
+      console.log(`   ✅ Enhanced privacy controls and transparency`);
+      console.log(`\n🔧 DEBUG ENDPOINTS:`);
+      console.log(`   🔍 GET /api/debug/users - Show existing users (dev only)`);
+      console.log(`   🏥 GET /health - Server health and feature list`);
+    });
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    console.error('❌ Error details:', error.message);
+    console.error('❌ Error stack:', error.stack);
+    process.exit(1);
+  }
+};
+
+// Start the server
+startServer();DataPurposeExists = await columnExists('journal_entries', 'data_purpose');
     if (!journalDataPurposeExists) {
       await pool.query('ALTER TABLE journal_entries ADD COLUMN data_purpose VARCHAR(100) DEFAULT \'journaling\'');
       console.log('✅ Added data_purpose to journal_entries');
@@ -584,6 +1074,42 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// DEBUG ENDPOINT: Check what users exist (development only)
+app.get('/api/debug/users', async (req, res) => {
+  try {
+    // Only enable in development
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    console.log('🔍 DEBUG: Fetching all users');
+    const users = await pool.query('SELECT id, username, email, created_at FROM users ORDER BY created_at DESC LIMIT 10');
+    
+    console.log(`📊 DEBUG: Found ${users.rows.length} users`);
+    users.rows.forEach(user => {
+      console.log(`   - ${user.username} (${user.email}) - ID: ${user.id}`);
+    });
+
+    res.json({
+      success: true,
+      count: users.rows.length,
+      users: users.rows.map(user => ({
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        created_at: user.created_at
+      }))
+    });
+  } catch (error) {
+    console.error('Debug users error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch users',
+      details: error.message 
+    });
+  }
+});
+
 // FIXED USER REGISTRATION
 app.post('/api/auth/register', async (req, res) => {
   console.log('🚀 Registration request started');
@@ -628,7 +1154,7 @@ app.post('/api/auth/register', async (req, res) => {
     // Check if user already exists
     console.log('🔍 Checking for existing user...');
     const existingUser = await safePoolQuery(
-      'SELECT id FROM users WHERE username = $1 OR email = $2',
+      'SELECT id FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
       [username, email]
     );
     console.log(`📊 Found ${existingUser.rows.length} existing users`);
@@ -754,9 +1280,9 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// IMPROVED USER LOGIN
+// ENHANCED LOGIN with detailed debugging
 app.post('/api/auth/login', async (req, res) => {
-  console.log('🔐 Login request started');
+  console.log('🔐 Enhanced login request started');
   console.log('📤 Login request body:', JSON.stringify(req.body, null, 2));
   
   try {
@@ -772,15 +1298,36 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     console.log('🔍 Looking up user:', username);
+    console.log('🔍 Searching for username OR email matching:', username);
 
-    // Find user (allow login with username or email)
-    const userResult = await pool.query(
-      'SELECT id, username, email, password_hash FROM users WHERE username = $1 OR email = $1',
-      [username]
-    );
+    // Enhanced user lookup with detailed logging
+    const userQuery = 'SELECT id, username, email, password_hash, created_at FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($1)';
+    console.log('🔍 Executing query:', userQuery);
+    console.log('🔍 With parameter:', username);
+
+    const userResult = await pool.query(userQuery, [username]);
+    
+    console.log('📊 Query results:');
+    console.log('   - Rows returned:', userResult.rows.length);
+    
+    if (userResult.rows.length > 0) {
+      console.log('   - Found user:', {
+        id: userResult.rows[0].id,
+        username: userResult.rows[0].username,
+        email: userResult.rows[0].email,
+        created_at: userResult.rows[0].created_at
+      });
+    } else {
+      console.log('   - No matching users found');
+      
+      // DEBUG: Let's check what users actually exist
+      console.log('🔍 DEBUG: Checking all users in database...');
+      const allUsers = await pool.query('SELECT username, email FROM users LIMIT 5');
+      console.log('📊 Current users in database:', allUsers.rows);
+    }
 
     if (userResult.rows.length === 0) {
-      console.log('❌ User not found');
+      console.log('❌ User not found in database');
       return res.status(401).json({ 
         success: false,
         error: 'Invalid credentials',
@@ -908,11 +1455,12 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '5.3.0 - Fixed SQL Parameter Mismatches',
+    version: '5.4.0 - Enhanced Login Debug',
     database: 'PostgreSQL',
     compliance: 'PIPEDA (Personal Information Protection and Electronic Documents Act)',
     endpoints: [
       '/api/auth/*', 
+      '/api/debug/users (dev only)',
       '/api/consent',
       '/api/consent/status',
       '/api/data-deletion',
@@ -929,6 +1477,8 @@ app.get('/health', (req, res) => {
     ],
     features: [
       'PIPEDA-compliant data handling',
+      'Enhanced login debugging with detailed logging',
+      'Case-insensitive username/email lookup',
       'Fixed SQL parameter mismatches',
       'Safe column handling for gradual database migration',
       'Granular consent management with audit trails',
@@ -944,7 +1494,8 @@ app.get('/health', (req, res) => {
       'Transaction-based user registration',
       'Improved error handling and logging',
       'Fixed CORS configuration',
-      'Consistent JSON response format'
+      'Consistent JSON response format',
+      'Debug endpoint for development'
     ],
     success: true
   });
@@ -1559,488 +2110,4 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
     console.log('📝 Executing journal insert:', insertQuery);
     console.log('📝 With parameters:', params.map((p, i) => i === 1 ? `[${p.length} chars]` : p)); // Don't log full content
     
-    const journalResult = await pool.query(insertQuery, params);
-    
-    const savedEntry = journalResult.rows[0];
-    console.log('✅ Journal entry saved successfully:', savedEntry.id);
-    
-    res.json({ 
-      success: true, 
-      message: 'Journal entry saved successfully',
-      entry: savedEntry
-    });
-  } catch (error) {
-    console.error('💥 Journal save error:', error);
-    console.error('💥 Error details:', error.message);
-    console.error('💥 Error stack:', error.stack);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to save journal entry',
-      message: 'Failed to save journal entry',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-});
-
-// PIPEDA: Enhanced CHAT ENDPOINT with consent checking
-app.post('/api/chat', authenticateToken, async (req, res) => {
-  console.log('💬 Chat request for user:', req.user.userId);
-  
-  try {
-    const { message, chatHistory, sessionId, consentedToAI } = req.body;
-    
-    // PIPEDA: Check AI processing consent
-    if (!consentedToAI) {
-      console.log('❌ AI processing consent not given');
-      return res.status(403).json({ 
-        success: false,
-        error: 'AI processing consent required',
-        message: 'AI processing consent required',
-        requiresConsent: true 
-      });
-    }
-
-    await logDataAccess(req.user.userId, 'create', 'chat_message', req, 'ai_conversation');
-    
-    let currentSession = null;
-
-    if (sessionId) {
-      // Try to find existing session
-      const sessionResult = await pool.query(
-        'SELECT * FROM chat_sessions WHERE id = $1 AND user_id = $2',
-        [sessionId, req.user.userId]
-      );
-      
-      if (sessionResult.rows.length > 0) {
-        currentSession = sessionResult.rows[0];
-      }
-    }
-    
-    if (!currentSession) {
-      // Create new session
-      const sessionResult = await pool.query(
-        'INSERT INTO chat_sessions (user_id, start_time, last_activity, user_context) VALUES ($1, NOW(), NOW(), $2) RETURNING *',
-        [req.user.userId, JSON.stringify({ mood: null, recentJournalThemes: [], questionnaireCompleted: false })]
-      );
-      currentSession = sessionResult.rows[0];
-    }
-
-    // PIPEDA: Detect sensitive content
-    const sensitiveKeywords = ['suicide', 'self-harm', 'kill myself', 'medication', 'doctor', 'therapist', 'address', 'phone', 'social security'];
-    const containsSensitive = sensitiveKeywords.some(keyword => message.toLowerCase().includes(keyword));
-
-    // Add current user message to session
-    await pool.query(
-      'INSERT INTO chat_messages (session_id, role, content, contains_sensitive_data, timestamp) VALUES ($1, $2, $3, $4, NOW())',
-      [currentSession.id, 'user', message, containsSensitive]
-    );
-
-    // Get user context for AI
-    const questionnaireResult = await pool.query(
-      'SELECT * FROM questionnaire_responses WHERE user_id = $1',
-      [req.user.userId]
-    );
-
-    const profileResult = await pool.query(
-      'SELECT * FROM user_profiles WHERE user_id = $1',
-      [req.user.userId]
-    );
-
-    const recentMoodsResult = await pool.query(
-      'SELECT mood, entry_date FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 5',
-      [req.user.userId]
-    );
-
-    const recentJournalsResult = await pool.query(
-      'SELECT content FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 3',
-      [req.user.userId]
-    );
-
-    // Update session context
-    const userContext = {
-      mood: recentMoodsResult.rows.length > 0 ? recentMoodsResult.rows[0].mood : null,
-      recentJournalThemes: recentJournalsResult.rows.map(j => j.content.substring(0, 100)),
-      questionnaireCompleted: questionnaireResult.rows.length > 0 ? questionnaireResult.rows[0].completed : false,
-      lastMoodDate: recentMoodsResult.rows.length > 0 ? recentMoodsResult.rows[0].entry_date : null
-    };
-
-    await pool.query(
-      'UPDATE chat_sessions SET last_activity = NOW(), user_context = $1 WHERE id = $2',
-      [JSON.stringify(userContext), currentSession.id]
-    );
-
-    let questionnaireContext = '';
-    if (questionnaireResult.rows.length > 0 && questionnaireResult.rows[0].completed) {
-      const responses = questionnaireResult.rows[0];
-      questionnaireContext = `\n\nIMPORTANT USER CONTEXT (reference naturally when relevant):`;
-      
-      if (responses.first_name) {
-        questionnaireContext += `\n- Name: ${responses.first_name} (call them ${responses.first_name})`;
-      }
-      if (responses.pronouns) {
-        questionnaireContext += `\n- Pronouns: ${responses.pronouns}`;
-      }
-      
-      const goalsText = responses.main_goals && responses.main_goals.length > 0 
-        ? responses.main_goals.join(', ') 
-        : 'Not specified';
-      
-      questionnaireContext += `\n- Goals: ${goalsText}
-- Communication style: ${responses.communication_style || 'Not specified'}`;
-    }
-
-    // Build messages for OpenAI using stored session messages
-    const messages = [
-      {
-        role: 'system',
-        content: `You are Luma, a supportive AI mental health companion who has genuine, caring conversations while providing helpful insights when needed.
-
-CONVERSATION STYLE:
-- Respond like a caring, insightful friend who truly listens
-- Ask thoughtful follow-up questions to understand their full situation
-- Reflect back what you're hearing to show you understand
-- Share insights naturally within conversation, not as numbered lists
-- Be genuinely curious about their specific experience
-- Remember you're having a conversation, not giving a therapy session
-
-RESPONSE APPROACH:
-1. First, acknowledge their feelings and show understanding
-2. Ask a thoughtful follow-up question to learn more about their situation
-3. If appropriate, weave in ONE relevant insight or gentle suggestion naturally
-4. Keep the conversation flowing - focus on connection over solutions
-
-TONE: Warm, genuine, curious, supportive - like talking to someone who really cares about understanding your experience first, not just solving your problems.
-
-IMPORTANT - AVOID:
-- Numbered lists of suggestions
-- Immediately jumping to solutions before understanding
-- Generic advice without knowing their specific context
-- Sounding clinical, robotic, or overly therapeutic
-- Giving multiple strategies at once
-
-Remember: People want to feel heard and understood FIRST, then gently guided toward insights.${questionnaireContext}`
-      }
-    ];
-    
-    // Add recent conversation history from stored session (last 10 messages for context)
-    const recentMessagesResult = await pool.query(
-      'SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY timestamp DESC LIMIT 11',
-      [currentSession.id]
-    );
-
-    // Reverse to get chronological order, exclude the message we just added
-    const recentMessages = recentMessagesResult.rows.reverse().slice(0, -1);
-    recentMessages.forEach(msg => {
-      if (msg.role === 'user' || msg.role === 'assistant') {
-        messages.push({
-          role: msg.role,
-          content: msg.content
-        });
-      }
-    });
-    
-    // Add the current message
-    messages.push({
-      role: 'user',
-      content: message
-    });
-    
-    // Call OpenAI
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4',
-        messages: messages,
-        temperature: 0.8,
-        max_tokens: 400
-      }),
-    });
-    
-    const data = await response.json();
-    
-    if (data.choices && data.choices[0]) {
-      // Add AI response to session
-      await pool.query(
-        'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
-        [currentSession.id, 'assistant', data.choices[0].message.content]
-      );
-
-      // Count messages in session
-      const messageCountResult = await pool.query(
-        'SELECT COUNT(*) as count FROM chat_messages WHERE session_id = $1',
-        [currentSession.id]
-      );
-      
-      console.log(`💬 Chat session ${currentSession.id}: ${messageCountResult.rows[0].count} messages`);
-      
-      res.json({ 
-        success: true,
-        response: data.choices[0].message.content,
-        sessionId: currentSession.id
-      });
-    } else {
-      console.error('❌ No response from OpenAI:', data);
-      res.status(500).json({ 
-        success: false,
-        error: 'No response from AI',
-        message: 'No response from AI'
-      });
-    }
-  } catch (error) {
-    console.error('💥 Chat error:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Server error',
-      message: 'Server error'
-    });
-  }
-});
-
-// PIPEDA: Consent management endpoints
-app.post('/api/consent', authenticateToken, async (req, res) => {
-  try {
-    const {
-      dataCollection,
-      aiProcessing,
-      moodTracking,
-      journaling,
-      notifications,
-      dataSharing,
-      version = '1.0'
-    } = req.body;
-
-    await logDataAccess(req.user.userId, 'create', 'consent_record', req, 'consent_management');
-
-    // Insert new consent record
-    await pool.query(
-      `INSERT INTO user_consents (user_id, data_collection, ai_processing, mood_tracking, journaling, notifications, data_sharing, version, ip_address, user_agent, consent_timestamp)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
-      [req.user.userId, dataCollection, aiProcessing, moodTracking, journaling, notifications, dataSharing, version, req.ip, req.get('User-Agent')]
-    );
-
-    res.json({
-      success: true,
-      message: 'Consent preferences saved successfully'
-    });
-  } catch (error) {
-    console.error('Consent save error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to save consent preferences',
-      message: 'Failed to save consent preferences'
-    });
-  }
-});
-
-app.get('/api/consent/status', authenticateToken, async (req, res) => {
-  try {
-    await logDataAccess(req.user.userId, 'read', 'consent_status', req);
-
-    const consentResult = await pool.query(
-      'SELECT * FROM user_consents WHERE user_id = $1 ORDER BY consent_timestamp DESC LIMIT 1',
-      [req.user.userId]
-    );
-
-    if (consentResult.rows.length === 0) {
-      return res.json({
-        success: true,
-        consents: {
-          dataCollection: false,
-          aiProcessing: false,
-          moodTracking: false,
-          journaling: false,
-          notifications: false,
-          dataSharing: false
-        }
-      });
-    }
-
-    const consent = consentResult.rows[0];
-    res.json({
-      success: true,
-      consents: {
-        dataCollection: consent.data_collection,
-        aiProcessing: consent.ai_processing,
-        moodTracking: consent.mood_tracking,
-        journaling: consent.journaling,
-        notifications: consent.notifications,
-        dataSharing: consent.data_sharing
-      },
-      consentTimestamp: consent.consent_timestamp,
-      version: consent.version
-    });
-  } catch (error) {
-    console.error('Consent status error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get consent status',
-      message: 'Failed to get consent status'
-    });
-  }
-});
-
-// PIPEDA: Data deletion endpoint
-app.post('/api/data-deletion', authenticateToken, async (req, res) => {
-  try {
-    const { requestType = 'complete_deletion' } = req.body;
-
-    await logDataAccess(req.user.userId, 'create', 'data_deletion_request', req, 'user_rights');
-
-    // Record the deletion request
-    await pool.query(
-      'INSERT INTO data_deletion_requests (user_id, request_type, status, requested_at) VALUES ($1, $2, $3, NOW())',
-      [req.user.userId, requestType, 'processing']
-    );
-
-    // Perform the deletion
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      // Delete user data in correct order (foreign key constraints)
-      await client.query('DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id = $1)', [req.user.userId]);
-      await client.query('DELETE FROM chat_sessions WHERE user_id = $1', [req.user.userId]);
-      await client.query('DELETE FROM journal_entries WHERE user_id = $1', [req.user.userId]);
-      await client.query('DELETE FROM mood_entries WHERE user_id = $1', [req.user.userId]);
-      await client.query('DELETE FROM questionnaire_responses WHERE user_id = $1', [req.user.userId]);
-      await client.query('DELETE FROM user_consents WHERE user_id = $1', [req.user.userId]);
-      await client.query('DELETE FROM data_access_logs WHERE user_id = $1', [req.user.userId]);
-      await client.query('DELETE FROM user_profiles WHERE user_id = $1', [req.user.userId]);
-      await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [req.user.userId]);
-      
-      // Update deletion request status
-      await client.query(
-        'UPDATE data_deletion_requests SET status = $1, processed_at = NOW() WHERE user_id = $2 AND status = $3',
-        ['completed', req.user.userId, 'processing']
-      );
-
-      // Delete the user last
-      await client.query('DELETE FROM users WHERE id = $1', [req.user.userId]);
-
-      await client.query('COMMIT');
-
-      console.log(`🗑️ Complete data deletion completed for user ${req.user.userId}`);
-
-      res.json({
-        success: true,
-        message: 'All your data has been permanently deleted'
-      });
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error('Data deletion error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to delete data',
-      message: 'Failed to delete data'
-    });
-  }
-});
-
-// PIPEDA: Data export endpoint
-app.get('/api/user/export-data', authenticateToken, async (req, res) => {
-  try {
-    await logDataAccess(req.user.userId, 'read', 'complete_data_export', req, 'user_rights');
-
-    // Get all user data
-    const userData = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
-    const profileData = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1', [req.user.userId]);
-    const moodData = await pool.query('SELECT * FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
-    const journalData = await pool.query('SELECT * FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
-    const consentData = await pool.query('SELECT * FROM user_consents WHERE user_id = $1 ORDER BY consent_timestamp DESC', [req.user.userId]);
-    const questionnaireData = await pool.query('SELECT * FROM questionnaire_responses WHERE user_id = $1', [req.user.userId]);
-
-    const exportData = {
-      exportDate: new Date().toISOString(),
-      userData: userData.rows[0] || {},
-      profile: profileData.rows[0] || {},
-      moodEntries: moodData.rows,
-      journalEntries: journalData.rows,
-      consentHistory: consentData.rows,
-      questionnaireResponses: questionnaireData.rows,
-      dataRetentionInfo: {
-        retentionPeriodDays: profileData.rows[0]?.data_retention_period || 365,
-        dataTypes: {
-          profile: "Retained for account lifetime",
-          moodEntries: "Retained according to user preferences",
-          journalEntries: "Retained according to user preferences",
-          chatHistory: "Not permanently stored"
-        }
-      }
-    };
-
-    res.json({
-      success: true,
-      data: exportData
-    });
-  } catch (error) {
-    console.error('Data export error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to export data',
-      message: 'Failed to export data'
-    });
-  }
-});
-
-// Start server with proper initialization
-const startServer = async () => {
-  try {
-    console.log('🚀 Starting Luma Backend Server...');
-    
-    // Test database connection
-    console.log('🔗 Testing database connection...');
-    const client = await pool.connect();
-    console.log('✅ Database connection successful');
-    client.release();
-    
-    // Initialize database
-    console.log('🗄️ Initializing database...');
-    await initializeDatabase();
-    console.log('✅ Database initialization complete');
-    
-    // Start the server
-    app.listen(PORT, () => {
-      console.log(`✅ Luma Fixed PIPEDA-compliant backend running on port ${PORT}`);
-      console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
-      console.log(`🗄️ Database: PostgreSQL with Fixed PIPEDA-compliant schema`);
-      console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing RESEND_API_KEY'}`);
-      console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
-      console.log(`🔗 Database URL: ${process.env.DATABASE_URL ? '✅ Configured' : '❌ Missing DATABASE_URL'}`);
-      console.log(`🔑 JWT Secret: ${JWT_SECRET !== 'your-super-secret-jwt-key-change-this' ? '✅ Configured' : '⚠️ Using default - please change'}`);
-      console.log(`\n🔥 SERVER IS READY TO HANDLE REQUESTS`);
-      console.log(`\n🎉 FIXED PIPEDA COMPLIANCE FEATURES:`);
-      console.log(`   ✅ FIXED: SQL parameter mismatches in all queries`);
-      console.log(`   ✅ FIXED: Registration endpoint with transaction support`);
-      console.log(`   ✅ FIXED: Profile/mood/journal save operations`);
-      console.log(`   ✅ Enhanced error logging with query details`);
-      console.log(`   ✅ Improved CORS configuration`);
-      console.log(`   ✅ Consistent JSON response format`);
-      console.log(`   ✅ Safe column handling for gradual database migration`);
-      console.log(`   ✅ Backward compatibility with existing database schemas`);
-      console.log(`   ✅ Granular consent management with audit trails`);
-      console.log(`   ✅ Data minimization (reduced personal data collection)`);
-      console.log(`   ✅ User rights implementation (access, portability, deletion)`);
-      console.log(`   ✅ Automatic data retention policies`);
-      console.log(`   ✅ Comprehensive audit logging`);
-      console.log(`   ✅ Sensitive content detection and flagging`);
-      console.log(`   ✅ Enhanced privacy controls and transparency`);
-    });
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    console.error('❌ Error details:', error.message);
-    console.error('❌ Error stack:', error.stack);
-    process.exit(1);
-  }
-};
-
-// Start the server
-startServer();
+    const journal
