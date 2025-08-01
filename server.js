@@ -163,12 +163,22 @@ async function initializeDatabase() {
         main_goals TEXT[] DEFAULT ARRAY[]::TEXT[],
         communication_style VARCHAR(255),
         data_purpose VARCHAR(100) DEFAULT 'app_personalization',
-        consent_given BOOLEAN DEFAULT false,
         completed_at TIMESTAMP WITH TIME ZONE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
     `);
+
+    // CRITICAL FIX: Add missing columns that may not exist
+    try {
+      await pool.query(`
+        ALTER TABLE questionnaire_responses 
+        ADD COLUMN IF NOT EXISTS consent_given BOOLEAN DEFAULT false
+      `);
+      console.log('✅ consent_given column ensured');
+    } catch (alterError) {
+      console.log('⚠️ Could not add consent_given column:', alterError.message);
+    }
 
     // Mood entries
     await pool.query(`
