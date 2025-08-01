@@ -131,6 +131,26 @@ pool.connect((err, client, release) => {
   }
 });
 
+// Enhanced error handling for database operations
+const safePoolQuery = async (query, params = []) => {
+  try {
+    console.log('🔍 Executing query:', query);
+    console.log('🔍 With params:', params);
+    
+    const result = await pool.query(query, params);
+    console.log('✅ Query executed successfully, rows:', result.rows.length);
+    return result;
+  } catch (error) {
+    console.error('💥 Database query failed:', error);
+    console.error('💥 Query was:', query);
+    console.error('💥 Params were:', params);
+    console.error('💥 Error code:', error.code);
+    console.error('💥 Error detail:', error.detail);
+    console.error('💥 Error constraint:', error.constraint);
+    throw error;
+  }
+};
+
 // HELPER FUNCTION: Check if column exists before using it
 const columnExists = async (tableName, columnName) => {
   try {
@@ -198,7 +218,7 @@ async function initializeDatabase() {
       console.log('✅ Added data_retention_period to user_profiles');
     }
 
-    // Add other enhanced columns
+    // Add other enhanced columns if they don't exist
     const enhancedColumns = [
       'app_theme VARCHAR(20) DEFAULT \'system\'',
       'accessibility_features JSONB DEFAULT \'{}\'',
@@ -564,11 +584,10 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// IMPROVED USER REGISTRATION
+// FIXED USER REGISTRATION
 app.post('/api/auth/register', async (req, res) => {
   console.log('🚀 Registration request started');
   console.log('📤 Request body:', JSON.stringify(req.body, null, 2));
-  console.log('📍 Request headers:', JSON.stringify(req.headers, null, 2));
   
   try {
     const { username, email, password } = req.body;
@@ -608,7 +627,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     // Check if user already exists
     console.log('🔍 Checking for existing user...');
-    const existingUser = await pool.query(
+    const existingUser = await safePoolQuery(
       'SELECT id FROM users WHERE username = $1 OR email = $2',
       [username, email]
     );
@@ -631,88 +650,85 @@ app.post('/api/auth/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, saltRounds);
     console.log('✅ Password hashed successfully');
 
-    // Create user
+    // Create user with transaction
     console.log('👤 Creating user in database...');
-    const userResult = await pool.query(
-      'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, created_at',
-      [username, email, hashedPassword]
-    );
-    console.log('✅ User created:', userResult.rows[0]);
-
-    const newUser = userResult.rows[0];
-
-    // Create user profile - THIS IS WHERE IT MIGHT FAIL
-    console.log('📋 Creating user profile...');
+    const client = await pool.connect();
     
     try {
-      // Check if data_retention_period column exists
-      console.log('🔍 Checking if data_retention_period column exists...');
+      await client.query('BEGIN');
+      
+      // Create user
+      const userResult = await client.query(
+        'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, created_at',
+        [username, email, hashedPassword]
+      );
+      console.log('✅ User created:', userResult.rows[0]);
+
+      const newUser = userResult.rows[0];
+
+      // Create user profile
+      console.log('📋 Creating user profile...');
+      
       const hasRetentionColumn = await columnExists('user_profiles', 'data_retention_period');
-      console.log('📊 data_retention_period column exists:', hasRetentionColumn);
       
       if (hasRetentionColumn) {
-        console.log('💾 Creating profile with retention column...');
-        await pool.query(
+        await client.query(
           `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes, data_retention_period) 
            VALUES ($1, '', '', NOW(), '#800080', true, false, false, '19:00:00', '{"personalization","app_functionality"}', 365)`,
           [newUser.id]
         );
       } else {
-        console.log('💾 Creating profile without retention column...');
-        await pool.query(
+        await client.query(
           `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes) 
            VALUES ($1, '', '', NOW(), '#800080', true, false, false, '19:00:00', '{"personalization","app_functionality"}')`,
           [newUser.id]
         );
       }
       console.log('✅ User profile created successfully');
-    } catch (profileError) {
-      console.error('❌ User profile creation failed:', profileError);
-      console.error('❌ Profile error details:', profileError.message);
-      console.error('❌ Profile error stack:', profileError.stack);
-      // Don't fail the registration, just log the error
-    }
 
-    // Create questionnaire response - THIS MIGHT ALSO FAIL
-    console.log('📝 Creating questionnaire response...');
-    try {
-      await pool.query(
+      // Create questionnaire response
+      console.log('📝 Creating questionnaire response...');
+      await client.query(
         `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given) 
          VALUES ($1, false, '', '', '{}', '', 'app_personalization', false)`,
         [newUser.id]
       );
       console.log('✅ Questionnaire response created successfully');
-    } catch (questionnaireError) {
-      console.error('❌ Questionnaire response creation failed:', questionnaireError);
-      console.error('❌ Questionnaire error details:', questionnaireError.message);
-      // Don't fail the registration, just log the error
+
+      await client.query('COMMIT');
+      
+      // Generate JWT token
+      console.log('🎫 Generating JWT token...');
+      const token = jwt.sign(
+        { userId: newUser.id, username: newUser.username },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+      console.log('✅ JWT token generated');
+
+      console.log('🎉 Registration completed successfully');
+
+      // Return success response
+      const response = {
+        success: true,
+        message: 'User registered successfully',
+        token: token,
+        user: {
+          id: newUser.id,
+          username: newUser.username,
+          email: newUser.email
+        }
+      };
+
+      console.log('📤 Sending success response');
+      res.status(200).json(response);
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
-
-    // Generate JWT token
-    console.log('🎫 Generating JWT token...');
-    const token = jwt.sign(
-      { userId: newUser.id, username: newUser.username },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-    console.log('✅ JWT token generated');
-
-    console.log('🎉 Registration completed successfully');
-
-    // Return success response
-    const response = {
-      success: true,
-      message: 'User registered successfully',
-      token: token,
-      user: {
-        id: newUser.id,
-        username: newUser.username,
-        email: newUser.email
-      }
-    };
-
-    console.log('📤 Sending success response:', JSON.stringify(response, null, 2));
-    res.status(200).json(response);
 
   } catch (error) {
     console.error('💥 REGISTRATION FATAL ERROR:', error);
@@ -892,7 +908,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '5.2.0 - Fixed Registration with Detailed Logging',
+    version: '5.3.0 - Fixed SQL Parameter Mismatches',
     database: 'PostgreSQL',
     compliance: 'PIPEDA (Personal Information Protection and Electronic Documents Act)',
     endpoints: [
@@ -913,6 +929,7 @@ app.get('/health', (req, res) => {
     ],
     features: [
       'PIPEDA-compliant data handling',
+      'Fixed SQL parameter mismatches',
       'Safe column handling for gradual database migration',
       'Granular consent management with audit trails',
       'Data minimization principles',
@@ -924,6 +941,7 @@ app.get('/health', (req, res) => {
       'Complete data export functionality',
       'Secure data deletion',
       'Backward compatibility with existing database schemas',
+      'Transaction-based user registration',
       'Improved error handling and logging',
       'Fixed CORS configuration',
       'Consistent JSON response format'
@@ -1059,7 +1077,7 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
       updateQuery += `, onboarding_completed_at = NOW()`;
     }
     
-    updateQuery += ` WHERE user_id = ${paramIndex}`;
+    updateQuery += ` WHERE user_id = $${paramIndex}`;
     
     await pool.query(updateQuery, params);
     
@@ -1080,7 +1098,7 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
   }
 });
 
-// PIPEDA ENHANCED PROFILE ENDPOINTS
+// FIXED PROFILE ENDPOINTS
 app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
     await logDataAccess(req.user.userId, 'read', 'profile', req);
@@ -1170,52 +1188,52 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
 
     // Core fields that should always exist
     if (firstName !== undefined) {
-      updateFields.push(`first_name = ${paramIndex}`);
+      updateFields.push(`first_name = $${paramIndex}`);
       params.push(firstName);
       paramIndex++;
     }
     if (pronouns !== undefined) {
-      updateFields.push(`pronouns = ${paramIndex}`);
+      updateFields.push(`pronouns = $${paramIndex}`);
       params.push(pronouns);
       paramIndex++;
     }
     if (joinDate !== undefined) {
-      updateFields.push(`join_date = ${paramIndex}`);
+      updateFields.push(`join_date = $${paramIndex}`);
       params.push(joinDate);
       paramIndex++;
     }
     if (profileColorHex !== undefined) {
-      updateFields.push(`profile_color_hex = ${paramIndex}`);
+      updateFields.push(`profile_color_hex = $${paramIndex}`);
       params.push(profileColorHex);
       paramIndex++;
     }
     if (notifications !== undefined) {
-      updateFields.push(`notifications = ${paramIndex}`);
+      updateFields.push(`notifications = $${paramIndex}`);
       params.push(notifications);
       paramIndex++;
     }
     if (biometricAuth !== undefined) {
-      updateFields.push(`biometric_auth = ${paramIndex}`);
+      updateFields.push(`biometric_auth = $${paramIndex}`);
       params.push(biometricAuth);
       paramIndex++;
     }
     if (darkMode !== undefined) {
-      updateFields.push(`dark_mode = ${paramIndex}`);
+      updateFields.push(`dark_mode = $${paramIndex}`);
       params.push(darkMode);
       paramIndex++;
     }
     if (reminderTime !== undefined) {
-      updateFields.push(`reminder_time = ${paramIndex}`);
+      updateFields.push(`reminder_time = $${paramIndex}`);
       params.push(reminderTime);
       paramIndex++;
     }
     if (dataPurposes !== undefined) {
-      updateFields.push(`data_purposes = ${paramIndex}`);
+      updateFields.push(`data_purposes = $${paramIndex}`);
       params.push(dataPurposes);
       paramIndex++;
     }
 
-    // Enhanced fields that might not exist
+    // Enhanced fields that might not exist - CHECK FIRST
     const enhancedFieldMap = [
       { field: 'consent_timestamp', value: consentTimestamp, column: 'consent_timestamp' },
       { field: 'data_retention_period', value: dataRetentionPeriod, column: 'data_retention_period' },
@@ -1231,26 +1249,28 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
       if (value !== undefined) {
         const exists = await columnExists('user_profiles', column);
         if (exists) {
-          updateFields.push(`${column} = ${paramIndex}`);
+          updateFields.push(`${column} = $${paramIndex}`);
           params.push(value);
           paramIndex++;
         }
       }
     }
 
-    // Always update last_active_at and updated_at if they exist
+    // Always update timestamps if they exist
     const hasLastActive = await columnExists('user_profiles', 'last_active_at');
     if (hasLastActive) {
       updateFields.push('last_active_at = NOW()');
     }
     updateFields.push('updated_at = NOW()');
 
-    // Add user_id parameter
+    // Add user_id parameter at the end
     params.push(req.user.userId);
-    const userIdParam = `${paramIndex}`;
+    const userIdParam = `$${paramIndex}`;
 
     if (updateFields.length > 0) {
       const updateQuery = `UPDATE user_profiles SET ${updateFields.join(', ')} WHERE user_id = ${userIdParam}`;
+      console.log('🔧 Profile update query:', updateQuery);
+      console.log('🔧 Profile update params:', params);
       await pool.query(updateQuery, params);
     }
     
@@ -1270,7 +1290,7 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// PIPEDA ENHANCED MOOD ENDPOINTS
+// FIXED MOOD ENDPOINTS
 app.get('/api/mood', authenticateToken, async (req, res) => {
   console.log('📊 Mood entries request for user:', req.user.userId);
   
@@ -1361,7 +1381,7 @@ app.post('/api/mood', authenticateToken, async (req, res) => {
 
     console.log('💾 Creating mood entry with base fields:', { mood, note, date });
 
-    // Enhanced fields that might not exist
+    // Enhanced fields that might not exist - CHECK FIRST
     const enhancedFieldMap = [
       { field: 'data_purpose', value: dataPurpose, column: 'data_purpose' },
       { field: 'mood_category', value: moodCategory, column: 'mood_category' },
@@ -1376,7 +1396,7 @@ app.post('/api/mood', authenticateToken, async (req, res) => {
         const exists = await columnExists('mood_entries', column);
         if (exists) {
           insertFields.push(column);
-          insertValues.push(`${paramIndex}`);
+          insertValues.push(`$${paramIndex}`);
           params.push(value);
           paramIndex++;
           console.log(`✅ Added enhanced field ${column}:`, value);
@@ -1413,7 +1433,7 @@ app.post('/api/mood', authenticateToken, async (req, res) => {
   }
 });
 
-// PIPEDA ENHANCED JOURNAL ENDPOINTS
+// FIXED JOURNAL ENDPOINTS
 app.get('/api/journal', authenticateToken, async (req, res) => {
   console.log('📚 Journal entries request for user:', req.user.userId);
   
@@ -1509,7 +1529,7 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
 
     console.log('💾 Creating journal entry with base fields');
 
-    // Enhanced fields that might not exist
+    // Enhanced fields that might not exist - CHECK FIRST
     const enhancedFieldMap = [
       { field: 'data_purpose', value: dataPurpose, column: 'data_purpose' },
       { field: 'entry_type', value: entryType, column: 'entry_type' },
@@ -1525,7 +1545,7 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
         const exists = await columnExists('journal_entries', column);
         if (exists) {
           insertFields.push(column);
-          insertValues.push(`${paramIndex}`);
+          insertValues.push(`$${paramIndex}`);
           params.push(value);
           paramIndex++;
           console.log(`✅ Added enhanced field ${column}:`, value);
@@ -1562,7 +1582,7 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
   }
 });
 
-// PIPEDA: EnhancedCHAT ENDPOINT with consent checking
+// PIPEDA: Enhanced CHAT ENDPOINT with consent checking
 app.post('/api/chat', authenticateToken, async (req, res) => {
   console.log('💬 Chat request for user:', req.user.userId);
   
@@ -1780,6 +1800,197 @@ Remember: People want to feel heard and understood FIRST, then gently guided tow
   }
 });
 
+// PIPEDA: Consent management endpoints
+app.post('/api/consent', authenticateToken, async (req, res) => {
+  try {
+    const {
+      dataCollection,
+      aiProcessing,
+      moodTracking,
+      journaling,
+      notifications,
+      dataSharing,
+      version = '1.0'
+    } = req.body;
+
+    await logDataAccess(req.user.userId, 'create', 'consent_record', req, 'consent_management');
+
+    // Insert new consent record
+    await pool.query(
+      `INSERT INTO user_consents (user_id, data_collection, ai_processing, mood_tracking, journaling, notifications, data_sharing, version, ip_address, user_agent, consent_timestamp)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+      [req.user.userId, dataCollection, aiProcessing, moodTracking, journaling, notifications, dataSharing, version, req.ip, req.get('User-Agent')]
+    );
+
+    res.json({
+      success: true,
+      message: 'Consent preferences saved successfully'
+    });
+  } catch (error) {
+    console.error('Consent save error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to save consent preferences',
+      message: 'Failed to save consent preferences'
+    });
+  }
+});
+
+app.get('/api/consent/status', authenticateToken, async (req, res) => {
+  try {
+    await logDataAccess(req.user.userId, 'read', 'consent_status', req);
+
+    const consentResult = await pool.query(
+      'SELECT * FROM user_consents WHERE user_id = $1 ORDER BY consent_timestamp DESC LIMIT 1',
+      [req.user.userId]
+    );
+
+    if (consentResult.rows.length === 0) {
+      return res.json({
+        success: true,
+        consents: {
+          dataCollection: false,
+          aiProcessing: false,
+          moodTracking: false,
+          journaling: false,
+          notifications: false,
+          dataSharing: false
+        }
+      });
+    }
+
+    const consent = consentResult.rows[0];
+    res.json({
+      success: true,
+      consents: {
+        dataCollection: consent.data_collection,
+        aiProcessing: consent.ai_processing,
+        moodTracking: consent.mood_tracking,
+        journaling: consent.journaling,
+        notifications: consent.notifications,
+        dataSharing: consent.data_sharing
+      },
+      consentTimestamp: consent.consent_timestamp,
+      version: consent.version
+    });
+  } catch (error) {
+    console.error('Consent status error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get consent status',
+      message: 'Failed to get consent status'
+    });
+  }
+});
+
+// PIPEDA: Data deletion endpoint
+app.post('/api/data-deletion', authenticateToken, async (req, res) => {
+  try {
+    const { requestType = 'complete_deletion' } = req.body;
+
+    await logDataAccess(req.user.userId, 'create', 'data_deletion_request', req, 'user_rights');
+
+    // Record the deletion request
+    await pool.query(
+      'INSERT INTO data_deletion_requests (user_id, request_type, status, requested_at) VALUES ($1, $2, $3, NOW())',
+      [req.user.userId, requestType, 'processing']
+    );
+
+    // Perform the deletion
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Delete user data in correct order (foreign key constraints)
+      await client.query('DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id = $1)', [req.user.userId]);
+      await client.query('DELETE FROM chat_sessions WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM journal_entries WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM mood_entries WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM questionnaire_responses WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM user_consents WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM data_access_logs WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM user_profiles WHERE user_id = $1', [req.user.userId]);
+      await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [req.user.userId]);
+      
+      // Update deletion request status
+      await client.query(
+        'UPDATE data_deletion_requests SET status = $1, processed_at = NOW() WHERE user_id = $2 AND status = $3',
+        ['completed', req.user.userId, 'processing']
+      );
+
+      // Delete the user last
+      await client.query('DELETE FROM users WHERE id = $1', [req.user.userId]);
+
+      await client.query('COMMIT');
+
+      console.log(`🗑️ Complete data deletion completed for user ${req.user.userId}`);
+
+      res.json({
+        success: true,
+        message: 'All your data has been permanently deleted'
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Data deletion error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete data',
+      message: 'Failed to delete data'
+    });
+  }
+});
+
+// PIPEDA: Data export endpoint
+app.get('/api/user/export-data', authenticateToken, async (req, res) => {
+  try {
+    await logDataAccess(req.user.userId, 'read', 'complete_data_export', req, 'user_rights');
+
+    // Get all user data
+    const userData = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.userId]);
+    const profileData = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1', [req.user.userId]);
+    const moodData = await pool.query('SELECT * FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
+    const journalData = await pool.query('SELECT * FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC', [req.user.userId]);
+    const consentData = await pool.query('SELECT * FROM user_consents WHERE user_id = $1 ORDER BY consent_timestamp DESC', [req.user.userId]);
+    const questionnaireData = await pool.query('SELECT * FROM questionnaire_responses WHERE user_id = $1', [req.user.userId]);
+
+    const exportData = {
+      exportDate: new Date().toISOString(),
+      userData: userData.rows[0] || {},
+      profile: profileData.rows[0] || {},
+      moodEntries: moodData.rows,
+      journalEntries: journalData.rows,
+      consentHistory: consentData.rows,
+      questionnaireResponses: questionnaireData.rows,
+      dataRetentionInfo: {
+        retentionPeriodDays: profileData.rows[0]?.data_retention_period || 365,
+        dataTypes: {
+          profile: "Retained for account lifetime",
+          moodEntries: "Retained according to user preferences",
+          journalEntries: "Retained according to user preferences",
+          chatHistory: "Not permanently stored"
+        }
+      }
+    };
+
+    res.json({
+      success: true,
+      data: exportData
+    });
+  } catch (error) {
+    console.error('Data export error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to export data',
+      message: 'Failed to export data'
+    });
+  }
+});
+
 // Start server with proper initialization
 const startServer = async () => {
   try {
@@ -1798,19 +2009,21 @@ const startServer = async () => {
     
     // Start the server
     app.listen(PORT, () => {
-      console.log(`✅ Luma Enhanced PIPEDA-compliant backend running on port ${PORT}`);
+      console.log(`✅ Luma Fixed PIPEDA-compliant backend running on port ${PORT}`);
       console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
-      console.log(`🗄️ Database: PostgreSQL with Enhanced PIPEDA-compliant schema`);
+      console.log(`🗄️ Database: PostgreSQL with Fixed PIPEDA-compliant schema`);
       console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? '✅ Configured' : '❌ Missing RESEND_API_KEY'}`);
       console.log(`🤖 OpenAI service: ${process.env.OPENAI_API_KEY ? '✅ Configured' : '❌ Missing OPENAI_API_KEY'}`);
       console.log(`🔗 Database URL: ${process.env.DATABASE_URL ? '✅ Configured' : '❌ Missing DATABASE_URL'}`);
       console.log(`🔑 JWT Secret: ${JWT_SECRET !== 'your-super-secret-jwt-key-change-this' ? '✅ Configured' : '⚠️ Using default - please change'}`);
       console.log(`\n🔥 SERVER IS READY TO HANDLE REQUESTS`);
-      console.log(`\n🎉 ENHANCED PIPEDA COMPLIANCE FEATURES:`);
-      console.log(`   ✅ Fixed registration endpoint with detailed logging`);
+      console.log(`\n🎉 FIXED PIPEDA COMPLIANCE FEATURES:`);
+      console.log(`   ✅ FIXED: SQL parameter mismatches in all queries`);
+      console.log(`   ✅ FIXED: Registration endpoint with transaction support`);
+      console.log(`   ✅ FIXED: Profile/mood/journal save operations`);
+      console.log(`   ✅ Enhanced error logging with query details`);
       console.log(`   ✅ Improved CORS configuration`);
       console.log(`   ✅ Consistent JSON response format`);
-      console.log(`   ✅ Better error handling and debugging`);
       console.log(`   ✅ Safe column handling for gradual database migration`);
       console.log(`   ✅ Backward compatibility with existing database schemas`);
       console.log(`   ✅ Granular consent management with audit trails`);
