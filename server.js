@@ -81,7 +81,7 @@ app.use((req, res, next) => {
 
 // Logging middleware
 app.use((req, res, next) => {
-  console.log(${new Date().toISOString()} - ${req.method} ${req.path});
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
 
