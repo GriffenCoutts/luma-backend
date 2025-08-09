@@ -70,6 +70,7 @@ app.options('*', cors(corsOptions));
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With', 'Content-Type, Accept, Authorization');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   
   if (req.method === 'OPTIONS') {
@@ -1077,107 +1078,61 @@ app.get('/api/gamify/progress', authenticateToken, async (req, res) => {
 });
 
 /* =========================
-   DEBUG & HEALTH
+   PRIVACY / DATA DELETION
    ========================= */
-app.get('/api/debug/db-test', async (req, res) => {
+
+// Delete all data for the current user, but KEEP the account
+app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
+  const userId = req.user.userId;
+  const client = await pool.connect();
   try {
-    const client = await pool.connect();
-    const usersTest = await client.query('SELECT COUNT(*) as count FROM users');
-    const profilesTest = await client.query('SELECT COUNT(*) as count FROM user_profiles');
-    const questionnaireTest = await client.query('SELECT COUNT(*) as count FROM questionnaire_responses');
-    client.release();
-    res.json({
-      success: true,
-      message: 'Database connection and tables working',
-      data: {
-        users: parseInt(usersTest.rows[0].count),
-        profiles: parseInt(profilesTest.rows[0].count),
-        questionnaires: parseInt(questionnaireTest.rows[0].count)
-      }
-    });
-  } catch (error) {
-    console.error('❌ Database test error:', error);
-    res.status(500).json({ success: false, error: 'Database test failed', details: { message: error.message, code: error.code, detail: error.detail } });
-  }
-});
+    await client.query('BEGIN');
 
-app.get('/api/debug/users', async (req, res) => {
-  try {
-    if (process.env.NODE_ENV === 'production') return res.status(404).json({ error: 'Not found' });
-    const users = await pool.query('SELECT id, username, email, created_at FROM users ORDER BY created_at DESC LIMIT 10');
-    res.json({ success: true, count: users.rows.length, users: users.rows });
-  } catch (error) {
-    console.error('Debug users error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch users', details: error.message });
-  }
-});
+    // Delete child-table rows (keep users row)
+    const results = await Promise.all([
+      client.query('DELETE FROM mood_entries WHERE user_id = $1', [userId]),
+      client.query('DELETE FROM journal_entries WHERE user_id = $1', [userId]),
+      // chat_messages cascade on chat_sessions, but in case of no cascade this helps:
+      client.query(`
+        DELETE FROM chat_messages 
+        USING chat_sessions 
+        WHERE chat_messages.session_id = chat_sessions.id 
+          AND chat_sessions.user_id = $1
+      `, [userId]),
+      client.query('DELETE FROM chat_sessions WHERE user_id = $1', [userId]),
+      client.query('DELETE FROM questionnaire_responses WHERE user_id = $1', [userId]),
+      client.query('DELETE FROM password_resets WHERE user_id = $1', [userId]),
+      // Reset profile back to defaults
+      client.query(`
+        UPDATE user_profiles
+        SET first_name = '', pronouns = '', notifications = true, biometric_auth = false,
+            dark_mode = false, reminder_time = '19:00:00', data_purposes = ARRAY['personalization','app_functionality'],
+            updated_at = NOW()
+        WHERE user_id = $1
+      `, [userId]),
+      // Reset gamification
+      client.query(`
+        UPDATE gamification_progress
+        SET xp = 0, level = 1, current_streak = 0, longest_streak = 0, last_activity_date = NULL, updated_at = NOW()
+        WHERE user_id = $1
+      `, [userId]),
+      client.query('DELETE FROM user_badges WHERE user_id = $1', [userId]),
+    ]);
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    version: '6.4.0 - Gamification (XP + Streaks + Badges)',
-    database: 'PostgreSQL',
-    openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
-    features: {
-      passwordReset: 'Available',
-      profileFixes: 'Applied',
-      dataStructure: 'Fixed',
-      arrayHandling: 'Fixed',
-      aiPrompt: 'Enhanced',
-      gamification: 'XP/Streaks/Badges'
-    },
-    success: true
-  });
-});
+    await client.query('COMMIT');
 
-app.get('/', (req, res) => {
-  res.json({
-    message: 'Luma Backend API',
-    version: '6.4.0',
-    status: 'running',
-    endpoints: {
-      health: '/health',
-      auth: '/api/auth/*',
-      profile: '/api/profile',
-      mood: '/api/mood',
-      journal: '/api/journal',
-      chat: '/api/chat',
-      gamify: '/api/gamify/progress'
-    }
-  });
-});
+    const deleted = {
+      moodEntries: results[0].rowCount,
+      journalEntries: results[1].rowCount,
+      chatMessages: results[2].rowCount,
+      chatSessions: results[3].rowCount,
+      questionnaires: results[4].rowCount,
+      passwordResets: results[5].rowCount,
+      profileReset: results[6].rowCount,
+      gamificationReset: results[7].rowCount,
+      badgesDeleted: results[8].rowCount,
+    };
 
-// CATCH ALL
-app.use('*', (req, res) => {
-  res.status(404).json({ success: false, error: 'Route not found', message: 'The requested endpoint does not exist' });
-});
-
-// ERROR HANDLER
-app.use((error, req, res, next) => {
-  console.error('Unhandled error:', error);
-  res.status(500).json({ success: false, error: 'Internal server error', message: 'An unexpected error occurred' });
-});
-
-// Start server
-const startServer = async () => {
-  try {
-    console.log('🚀 Starting Luma Backend Server...');
-    const client = await pool.connect();
-    client.release();
-    await initializeDatabase();
-    console.log('✅ Database initialization complete');
-    app.listen(PORT, () => {
-      console.log(`✅ Luma backend running on port ${PORT}`);
-      console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
-      console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI GPT-4' : 'Fallback responses'}`);
-      console.log(`🔥 SERVER IS READY TO HANDLE REQUESTS`);
-      console.log(`🎯 Gamification: XP + streaks + badges enabled`);
-    });
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
-};
-
-startServer();
+    return res.json({ success: true, message: 'All data deleted (account kept).', deleted });
+  } catch (err) {
+    await client.query('ROLLBACK');
