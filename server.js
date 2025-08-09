@@ -113,7 +113,7 @@ async function initializeDatabase() {
     console.log('🗄️ Initializing database tables...');
     
     // Users table
-    await pool.query(
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(255) UNIQUE NOT NULL,
@@ -122,10 +122,10 @@ async function initializeDatabase() {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
-    );
+    `);
 
     // User profiles - FIXED: Ensure data_purposes column is created properly
-    await pool.query(
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS user_profiles (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -141,10 +141,10 @@ async function initializeDatabase() {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
-    );
+    `);
 
     // Password resets table
-    await pool.query(
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS password_resets (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -154,10 +154,10 @@ async function initializeDatabase() {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         UNIQUE(user_id)
       )
-    );
+    `);
 
     // Questionnaire responses - FIXED: Create with proper array handling
-    await pool.query(
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS questionnaire_responses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -171,21 +171,21 @@ async function initializeDatabase() {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
-    );
+    `);
 
     // CRITICAL FIX: Add missing columns that may not exist
     try {
-      await pool.query(
+      await pool.query(`
         ALTER TABLE questionnaire_responses 
         ADD COLUMN IF NOT EXISTS consent_given BOOLEAN DEFAULT false
-      );
+      `);
       console.log('✅ consent_given column ensured');
     } catch (alterError) {
       console.log('⚠️ Could not add consent_given column:', alterError.message);
     }
 
     // Mood entries
-    await pool.query(
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS mood_entries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -195,10 +195,10 @@ async function initializeDatabase() {
         data_purpose VARCHAR(100) DEFAULT 'mood_tracking',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
-    );
+    `);
 
     // Journal entries
-    await pool.query(
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS journal_entries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -208,10 +208,10 @@ async function initializeDatabase() {
         data_purpose VARCHAR(100) DEFAULT 'journaling',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
-    );
+    `);
 
     // Chat sessions
-    await pool.query(
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS chat_sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -221,10 +221,10 @@ async function initializeDatabase() {
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
-    );
+    `);
 
     // Chat messages
-    await pool.query(
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS chat_messages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
@@ -234,7 +234,7 @@ async function initializeDatabase() {
         timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )
-    );
+    `);
 
     console.log('✅ Database tables initialized successfully');
   } catch (error) {
@@ -272,13 +272,13 @@ const authenticateToken = (req, res, next) => {
 // Email sending function using Resend
 async function sendPasswordResetEmail(email, resetToken, username) {
   try {
-    const resetLink = luma://reset-password?token=${resetToken}; // Deep link for your iOS app
+    const resetLink = `luma://reset-password?token=${resetToken}`; // Deep link for your iOS app
     
     const { data, error } = await resend.emails.send({
       from: 'Luma <onboard@resend.dev>', // Using Resend's test domain
       to: [email],
       subject: 'Reset Your Luma Password',
-      html: 
+      html: `
         <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <div style="text-align: center; margin-bottom: 40px;">
             <div style="width: 60px; height: 60px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 20px;">
@@ -320,18 +320,18 @@ async function sendPasswordResetEmail(email, resetToken, username) {
             </p>
           </div>
         </div>
-      
+      `
     });
 
     if (error) {
-      console.error(❌ Resend email error for ${email}:, error);
+      console.error(`❌ Resend email error for ${email}:`, error);
       return false;
     }
 
-    console.log(✅ Password reset email sent to ${email} (ID: ${data.id}));
+    console.log(`✅ Password reset email sent to ${email} (ID: ${data.id})`);
     return true;
   } catch (error) {
-    console.error(❌ Failed to send password reset email to ${email}:, error);
+    console.error(`❌ Failed to send password reset email to ${email}:`, error);
     return false;
   }
 }
@@ -436,8 +436,8 @@ app.post('/api/auth/register', async (req, res) => {
       // Create user profile with fixed array syntax
       console.log('📋 Creating user profile...');
       const profileResult = await client.query(
-        INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes) 
-         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9) RETURNING id,
+        `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes) 
+         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9) RETURNING id`,
         [newUser.id, '', '', '#800080', true, false, false, '19:00:00', ['personalization', 'app_functionality']]
       );
       console.log('✅ User profile created with ID:', profileResult.rows[0].id);
@@ -445,8 +445,8 @@ app.post('/api/auth/register', async (req, res) => {
       // Create questionnaire response with fixed array syntax
       console.log('📝 Creating questionnaire record...');
       const questionnaireResult = await client.query(
-        INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id,
+        `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
         [newUser.id, false, '', '', [], '', 'app_personalization', false]
       );
       console.log('✅ Questionnaire record created with ID:', questionnaireResult.rows[0].id);
@@ -658,14 +658,14 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     
     // Save reset token to database
     await pool.query(
-      INSERT INTO password_resets (user_id, reset_token, expires_at, created_at) 
+      `INSERT INTO password_resets (user_id, reset_token, expires_at, created_at) 
        VALUES ($1, $2, $3, NOW())
        ON CONFLICT (user_id) 
-       DO UPDATE SET reset_token = $2, expires_at = $3, created_at = NOW(), used = false,
+       DO UPDATE SET reset_token = $2, expires_at = $3, created_at = NOW(), used = false`,
       [user.id, resetToken, resetExpires]
     );
     
-    console.log(🔑 Reset token generated for ${email}: ${resetToken});
+    console.log(`🔑 Reset token generated for ${email}: ${resetToken}`);
     
     // Send email if Resend API key is configured
     if (process.env.RESEND_API_KEY) {
@@ -729,10 +729,10 @@ app.post('/api/auth/reset-password', async (req, res) => {
     
     // Find valid reset token
     const resetResult = await pool.query(
-      SELECT pr.*, u.id as user_id, u.username 
+      `SELECT pr.*, u.id as user_id, u.username 
        FROM password_resets pr 
        JOIN users u ON pr.user_id = u.id 
-       WHERE pr.reset_token = $1 AND pr.expires_at > NOW() AND pr.used = false,
+       WHERE pr.reset_token = $1 AND pr.expires_at > NOW() AND pr.used = false`,
       [token]
     );
     
@@ -893,7 +893,7 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
       
       // Update questionnaire responses
       await client.query(
-        UPDATE questionnaire_responses 
+        `UPDATE questionnaire_responses 
          SET completed = true, 
              first_name = $1, 
              pronouns = $2, 
@@ -903,7 +903,7 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
              consent_given = $6,
              completed_at = NOW(),
              updated_at = NOW()
-         WHERE user_id = $7,
+         WHERE user_id = $7`,
         [
           responses.firstName || "",
           responses.pronouns || "",
@@ -918,12 +918,12 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
       // Also update user profile with questionnaire data
       console.log('📝 Updating user profile with name:', responses.firstName);
       const profileUpdateResult = await client.query(
-        UPDATE user_profiles 
+        `UPDATE user_profiles 
          SET first_name = $1, 
              pronouns = $2, 
              updated_at = NOW()
          WHERE user_id = $3
-         RETURNING first_name, pronouns,
+         RETURNING first_name, pronouns`,
         [responses.firstName || "", responses.pronouns || "", req.user.userId]
       );
 
@@ -1024,7 +1024,7 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
     console.log('📝 Processed data_purposes array:', dataArray);
     
     const updateResult = await pool.query(
-      UPDATE user_profiles 
+      `UPDATE user_profiles 
        SET first_name = $1, 
            pronouns = $2, 
            join_date = COALESCE($3, join_date),
@@ -1036,7 +1036,7 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
            data_purposes = $9,
            updated_at = NOW()
        WHERE user_id = $10
-       RETURNING first_name, pronouns, data_purposes,
+       RETURNING first_name, pronouns, data_purposes`,
       [
         firstName || "",
         pronouns || "",
@@ -1301,7 +1301,7 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
-            'Authorization': Bearer ${process.env.OPENAI_API_KEY},
+            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -1375,7 +1375,7 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
 
 // AI PROMPT GENERATION FUNCTIONS
 function generateEnhancedAIPrompt({ userProfile, recentMoods, recentJournals, questionnaire, userContext, containsSensitive }) {
-  let prompt = You are Luma, a compassionate AI therapist and wellness companion focused on mental health and emotional wellbeing. You provide thoughtful, empathetic responses that help users process their emotions and develop healthy coping strategies.
+  let prompt = `You are Luma, a compassionate AI therapist and wellness companion focused on mental health and emotional wellbeing. You provide thoughtful, empathetic responses that help users process their emotions and develop healthy coping strategies.
 
 CORE EXPERTISE:
 - Evidence-based therapy techniques (CBT, DBT, mindfulness, ACT)
@@ -1404,32 +1404,32 @@ COMMUNICATION STYLE:
 - Use therapeutic techniques naturally within conversation
 - Show genuine interest in their progress and wellbeing
 
-;
+`;
 
   // Add personalization based on user data
   if (userProfile.first_name) {
-    prompt += USER INFORMATION:
+    prompt += `USER INFORMATION:
 - Name: ${userProfile.first_name} (always use their name to create connection)
-;
+`;
     if (userProfile.pronouns) {
-      prompt += - Pronouns: ${userProfile.pronouns} (use these when referring to them)
-;
+      prompt += `- Pronouns: ${userProfile.pronouns} (use these when referring to them)
+`;
     }
   }
 
   // Add questionnaire insights
   if (questionnaire.completed) {
-    prompt += 
-QUESTIONNAIRE INSIGHTS:;
+    prompt += `
+QUESTIONNAIRE INSIGHTS:`;
     
     if (questionnaire.main_goals && questionnaire.main_goals.length > 0) {
-      prompt += 
-- Their main wellness goals: ${questionnaire.main_goals.join(', ')};
+      prompt += `
+- Their main wellness goals: ${questionnaire.main_goals.join(', ')}`;
     }
     
     if (questionnaire.communication_style) {
-      prompt += 
-- Preferred communication style: ${questionnaire.communication_style};
+      prompt += `
+- Preferred communication style: ${questionnaire.communication_style}`;
     }
   }
 
@@ -1438,68 +1438,68 @@ QUESTIONNAIRE INSIGHTS:;
     const avgMood = recentMoods.reduce((sum, entry) => sum + entry.mood, 0) / recentMoods.length;
     const moodTrend = analyzeMoodTrend(recentMoods);
     
-    prompt += 
+    prompt += `
 RECENT MOOD PATTERNS (Last 7 days):
 - Average mood: ${avgMood.toFixed(1)}/10
 - Trend: ${moodTrend}
-- Recent entries: ;
+- Recent entries: `;
     
     recentMoods.slice(0, 3).forEach(mood => {
       const daysAgo = Math.floor((Date.now() - new Date(mood.entry_date).getTime()) / (1000 * 60 * 60 * 24));
-      const timeRef = daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : ${daysAgo} days ago;
-      prompt += ${mood.mood}/10 (${timeRef});
-      if (mood.note) prompt +=  - "${mood.note}";
+      const timeRef = daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : `${daysAgo} days ago`;
+      prompt += `${mood.mood}/10 (${timeRef})`;
+      if (mood.note) prompt += ` - "${mood.note}"`;
       prompt += '; ';
     });
   }
 
   // Add journal theme analysis
   if (recentJournals && recentJournals.length > 0) {
-    prompt += 
-RECENT JOURNAL THEMES:;
+    prompt += `
+RECENT JOURNAL THEMES:`;
     
     recentJournals.forEach(journal => {
       const daysAgo = Math.floor((Date.now() - new Date(journal.entry_date).getTime()) / (1000 * 60 * 60 * 24));
-      const timeRef = daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : ${daysAgo} days ago;
+      const timeRef = daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : `${daysAgo} days ago`;
       
       if (journal.prompt) {
-        prompt += 
-- ${timeRef}: Reflected on "${journal.prompt}";
+        prompt += `
+- ${timeRef}: Reflected on "${journal.prompt}"`;
       }
       
       // Extract themes from journal content
       const themes = extractJournalThemes(journal.content);
       if (themes.length > 0) {
-        prompt += 
-  Themes: ${themes.join(', ')};
+        prompt += `
+  Themes: ${themes.join(', ')}`;
       }
     });
   }
 
   // Add sensitivity guidance
   if (containsSensitive) {
-    prompt += 
+    prompt += `
 ⚠️ SENSITIVE CONTENT DETECTED: The user's message contains potentially sensitive topics. Please:
 - Respond with extra care and empathy
 - Consider crisis intervention protocols if appropriate
 - Encourage professional help if the situation warrants it
 - Provide crisis resources if someone expresses suicidal ideation
-- Stay calm and supportive while taking the situation seriously;
+- Stay calm and supportive while taking the situation seriously`;
   }
 
   // Add contextual instructions
-  prompt += 
+  prompt += `
 RESPONSE GUIDELINES:
 - Reference their personal data naturally in conversation (don't just list facts)
 - Ask follow-up questions about patterns you notice in their mood/journal data
 - Provide personalized advice based on their specific situation and history
 - Celebrate their progress and validate their challenges
-- Use their name ${userProfile.first_name ? (${userProfile.first_name}) : ''} to create connection
+- Use their name ${userProfile.first_name ? `(${userProfile.first_name})` : ''} to create connection
 - Keep responses conversational, helpful, and under 300 words unless they ask for detailed guidance
 - If they're struggling, offer specific coping techniques based on their preferences and history
 - Always end with a thoughtful question or invitation to share more when appropriate
 
-Remember: You're having a conversation with a real person who has trusted you with their mental health journey. Be genuine, caring, and helpful while maintaining appropriate boundaries.;
+Remember: You're having a conversation with a real person who has trusted you with their mental health journey. Be genuine, caring, and helpful while maintaining appropriate boundaries.`;
 
   return prompt;
 }
@@ -1571,7 +1571,7 @@ function extractJournalThemes(content) {
 // Enhanced fallback response generator with user context
 function generateEnhancedFallbackResponse(message, userProfile, recentMoods, recentJournals) {
   const name = userProfile.first_name || '';
-  const greeting = name ? ${name},  : '';
+  const greeting = name ? `${name}, ` : '';
   const lowerMessage = message.toLowerCase();
   
   // Analyze recent data for context
@@ -1587,40 +1587,40 @@ function generateEnhancedFallbackResponse(message, userProfile, recentMoods, rec
   
   // Generate contextual responses
   if (lowerMessage.includes('anxious') || lowerMessage.includes('anxiety')) {
-    return ${greeting}I hear that you're feeling anxious${moodContext} That's completely understandable - anxiety is something many people experience. One technique that can help in the moment is the 4-7-8 breathing method: breathe in for 4 counts, hold for 7, and exhale for 8. This activates your body's relaxation response. 
+    return `${greeting}I hear that you're feeling anxious${moodContext} That's completely understandable - anxiety is something many people experience. One technique that can help in the moment is the 4-7-8 breathing method: breathe in for 4 counts, hold for 7, and exhale for 8. This activates your body's relaxation response. 
 
-Based on your recent patterns, it might also help to identify specific triggers. Can you tell me more about what's making you feel anxious right now?;
+Based on your recent patterns, it might also help to identify specific triggers. Can you tell me more about what's making you feel anxious right now?`;
   }
   
   if (lowerMessage.includes('sad') || lowerMessage.includes('depressed') || lowerMessage.includes('down')) {
-    return ${greeting}I'm sorry you're feeling this way${moodContext} Your feelings are valid, and it's important that you're reaching out. Sometimes when we're feeling low, small actions can help - even something as simple as stepping outside for a few minutes or reaching out to someone you care about.
+    return `${greeting}I'm sorry you're feeling this way${moodContext} Your feelings are valid, and it's important that you're reaching out. Sometimes when we're feeling low, small actions can help - even something as simple as stepping outside for a few minutes or reaching out to someone you care about.
 
-What's been on your mind lately that might be contributing to these feelings? Sometimes talking through our thoughts can provide clarity.;
+What's been on your mind lately that might be contributing to these feelings? Sometimes talking through our thoughts can provide clarity.`;
   }
   
   if (lowerMessage.includes('stress') || lowerMessage.includes('overwhelmed')) {
-    return ${greeting}Feeling stressed or overwhelmed is really challenging${moodContext} When we're in that state, it can help to break things down into smaller, manageable pieces. One approach is to identify what you can control versus what you can't - focusing your energy on the things within your influence.
+    return `${greeting}Feeling stressed or overwhelmed is really challenging${moodContext} When we're in that state, it can help to break things down into smaller, manageable pieces. One approach is to identify what you can control versus what you can't - focusing your energy on the things within your influence.
 
-What's the biggest source of stress for you right now? Let's see if we can work through it together.;
+What's the biggest source of stress for you right now? Let's see if we can work through it together.`;
   }
   
   if (lowerMessage.includes('sleep') || lowerMessage.includes('tired') || lowerMessage.includes('insomnia')) {
-    return ${greeting}Sleep issues can really impact how we feel overall${moodContext} Good sleep hygiene can make a big difference - things like keeping a consistent bedtime, avoiding screens before bed, and creating a calming bedtime routine.
+    return `${greeting}Sleep issues can really impact how we feel overall${moodContext} Good sleep hygiene can make a big difference - things like keeping a consistent bedtime, avoiding screens before bed, and creating a calming bedtime routine.
 
-How long have you been having trouble with sleep? Are there any patterns you've noticed that might be affecting your rest?;
+How long have you been having trouble with sleep? Are there any patterns you've noticed that might be affecting your rest?`;
   }
   
   // Check for positive messages
   if (lowerMessage.includes('good') || lowerMessage.includes('better') || lowerMessage.includes('happy')) {
-    return ${greeting}It's wonderful to hear that you're feeling good${moodContext} Celebrating these positive moments is important for our mental health. What's contributing to this positive feeling? 
+    return `${greeting}It's wonderful to hear that you're feeling good${moodContext} Celebrating these positive moments is important for our mental health. What's contributing to this positive feeling? 
 
-Sometimes it helps to reflect on what's working well so we can recognize and build on these patterns.;
+Sometimes it helps to reflect on what's working well so we can recognize and build on these patterns.`;
   }
   
   // General supportive response with personalization
-  return ${greeting}Thank you for sharing that with me${moodContext} I'm here to listen and support you. It sounds like you have something important on your mind, and I want you to know that your feelings and experiences matter.
+  return `${greeting}Thank you for sharing that with me${moodContext} I'm here to listen and support you. It sounds like you have something important on your mind, and I want you to know that your feelings and experiences matter.
 
-Sometimes just talking through our thoughts and feelings can provide clarity and relief. Can you tell me more about what you're experiencing right now? I'm here to help you work through whatever you're facing.;
+Sometimes just talking through our thoughts and feelings can provide clarity and relief. Can you tell me more about what you're experiencing right now? I'm here to help you work through whatever you're facing.`;
 }
 
 // Database connection test endpoint
@@ -1765,22 +1765,22 @@ const startServer = async () => {
     
     // Start the server
     app.listen(PORT, () => {
-      console.log(✅ Luma backend running on port ${PORT});
-      console.log(🌐 Server URL: https://luma-backend-nfdc.onrender.com);
-      console.log(🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI GPT-4' : 'Fallback responses'});
-      console.log(🔥 SERVER IS READY TO HANDLE REQUESTS);
-      console.log(\n🎉 FEATURES INCLUDED:);
-      console.log(   ✅ FIXED: PostgreSQL array handling for registration);
-      console.log(   ✅ Enhanced transaction management with proper rollback);
-      console.log(   ✅ Improved error handling with specific PostgreSQL error codes);
-      console.log(   ✅ Fixed database schema initialization with proper data types);
-      console.log(   ✅ Added Resend email integration for password resets);
-      console.log(   ✅ Enhanced AI therapist prompt with evidence-based techniques);
-      console.log(   ✅ Complete password reset functionality with secure tokens);
-      console.log(   ✅ Intelligent fallback responses when OpenAI is unavailable);
-      console.log(   ✅ Personalized responses using user's name and context);
-      console.log(   ✅ Mood trend analysis and journal theme extraction);
-      console.log(   ✅ PIPEDA-compliant privacy features);
+      console.log(`✅ Luma backend running on port ${PORT}`);
+      console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
+      console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI GPT-4' : 'Fallback responses'}`);
+      console.log(`🔥 SERVER IS READY TO HANDLE REQUESTS`);
+      console.log(`\n🎉 FEATURES INCLUDED:`);
+      console.log(`   ✅ FIXED: PostgreSQL array handling for registration`);
+      console.log(`   ✅ Enhanced transaction management with proper rollback`);
+      console.log(`   ✅ Improved error handling with specific PostgreSQL error codes`);
+      console.log(`   ✅ Fixed database schema initialization with proper data types`);
+      console.log(`   ✅ Added Resend email integration for password resets`);
+      console.log(`   ✅ Enhanced AI therapist prompt with evidence-based techniques`);
+      console.log(`   ✅ Complete password reset functionality with secure tokens`);
+      console.log(`   ✅ Intelligent fallback responses when OpenAI is unavailable`);
+      console.log(`   ✅ Personalized responses using user's name and context`);
+      console.log(`   ✅ Mood trend analysis and journal theme extraction`);
+      console.log(`   ✅ PIPEDA-compliant privacy features`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
