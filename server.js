@@ -8,10 +8,6 @@ const crypto = require('crypto');
 const { Resend } = require('resend');
 require('dotenv').config();
 
-// >>> OpenAI (optional; falls back if no key present)
-const OpenAI = require('openai');
-const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -265,9 +261,9 @@ async function initializeDatabase() {
    ========================= */
 const authenticateToken = (req, res, next) => {
   const token = (req.headers['authorization'] || '').split(' ')[1];
-  if (!token) return res.status(401).json({ success: false, error: 'Access token required', message: 'Access token required' });
+  if (!token) return res.status(401).json({ success: false, error: 'Access token required' });
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ success: false, error: 'Invalid or expired token', message: 'Invalid or expired token' });
+    if (err) return res.status(403).json({ success: false, error: 'Invalid or expired token' });
     req.user = user;
     next();
   });
@@ -387,81 +383,6 @@ async function trackAction(userId, actionType) {
   } finally {
     client.release();
   }
-}
-
-/* =========================
-   LUMA AI PROMPTS (OpenAI)
-   ========================= */
-const LUMA_SYSTEM_PROMPT = `
-You are Luma, a warm, empathetic, and encouraging AI therapist.
-- Use short, supportive replies (usually under 50 words) and everyday language.
-- Acknowledge feelings before offering gentle questions or suggestions.
-- Ask open-ended questions that invite reflection; avoid interrogating.
-- Celebrate small wins. Never diagnose. Never shame.
-- If the user gives short answers, gently invite more.
-- If they decline to talk, respect it and offer alternatives (e.g., grounding or breathing).
-- Be steady, kind, and human in tone. Avoid sounding robotic.
-`;
-
-const LUMA_FEWSHOTS = [
-  { role: 'user', content: "I'm feeling anxious." },
-  { role: 'assistant', content: "That sounds tough. What’s been making you feel anxious lately?" },
-
-  { role: 'user', content: "I had a fight with my friend." },
-  { role: 'assistant', content: "That can be really hard. What happened between you two?" },
-
-  { role: 'user', content: "I don't want to talk about it." },
-  { role: 'assistant', content: "That’s okay. We can take it slow or focus on how you’re feeling right now." }
-];
-
-const LUMA_SAFETY_HINT = `
-If the user mentions crisis, self-harm, or immediate danger:
-- Acknowledge their pain
-- Encourage contacting local emergency services or a trusted person
-- Offer crisis resources in their region (if known) or general ones (e.g., 988 in the U.S.)
-- Stay supportive and non-judgmental
-`;
-
-function buildLumaMessages({ userMessage, chatHistory = [], userContext = {}, includeSafety = false }) {
-  const msgs = [
-    { role: 'system', content: LUMA_SYSTEM_PROMPT + (includeSafety ? '\n' + LUMA_SAFETY_HINT : '') },
-    ...LUMA_FEWSHOTS
-  ];
-
-  const contextBits = [];
-  if (userContext.firstName) contextBits.push(`Name: ${userContext.firstName}`);
-  if (userContext.recentMood) contextBits.push(`Recent mood: ${userContext.recentMood}`);
-  if (contextBits.length) {
-    msgs.push({ role: 'system', content: `Context: ${contextBits.join(' • ')}` });
-  }
-
-  const tail = chatHistory.slice(-8);
-  for (const m of tail) {
-    if (m?.role && m?.content) msgs.push({ role: m.role, content: m.content });
-  }
-
-  msgs.push({ role: 'user', content: userMessage || '' });
-  return msgs;
-}
-
-async function generateLumaReply({ userMessage, chatHistory, userContext, containsSensitive }) {
-  if (!openai) {
-    return "I'm here with you. Tell me more about what's on your mind.";
-  }
-  const messages = buildLumaMessages({
-    userMessage,
-    chatHistory,
-    userContext,
-    includeSafety: !!containsSensitive
-  });
-  const resp = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages,
-    temperature: 0.7,
-    max_tokens: 180
-  });
-  const text = resp.choices?.[0]?.message?.content?.trim();
-  return text || "I'm here with you. What feels most important to talk about right now?";
 }
 
 /* =========================
@@ -837,15 +758,99 @@ app.post('/api/journal', authenticateToken, async (req, res) => {
 });
 
 /* =========================
-   CHAT (with OpenAI prompt)
+   CHAT — OpenAI integration
    ========================= */
+
+// Therapist system prompt (kept concise but strong)
+const THERAPIST_SYSTEM_PROMPT = `
+You are Luma, a warm, evidence-based AI therapist. Goals:
+- Build rapport with empathy and validation.
+- Ask short, open-ended questions (1 per turn).
+- Use CBT/DBT/Motivational Interviewing tools when helpful.
+- Be concise (2–4 short sentences).
+- Avoid medical or legal claims; suggest professional help if risk appears.
+- If the user expresses suicidal intent or self-harm risk: (1) validate feelings, (2) encourage contacting local emergency services or a crisis line, (3) suggest reaching out to a trusted person, (4) ask if they feel safe right now.
+- Never reveal or invent PII. Do not mention policies.
+`;
+
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+
+// Pull last N messages from this chat session to keep context tight
+async function getRecentChatForSession(sessionId, limit = 12) {
+  const r = await pool.query(
+    `SELECT role, content
+     FROM chat_messages
+     WHERE session_id=$1
+     ORDER BY timestamp DESC
+     LIMIT $2`,
+    [sessionId, limit]
+  );
+  // reverse chronological -> chronological
+  return r.rows.reverse();
+}
+
+function toOpenAIMessages(historyRows, userDisplayName = 'User') {
+  const mapped = historyRows.map((m) => {
+    const role = m.role === 'assistant' ? 'assistant'
+              : m.role === 'system' ? 'system'
+              : 'user';
+    return { role, content: m.content };
+  });
+  // Prepend system instruction
+  return [
+    { role: 'system', content: THERAPIST_SYSTEM_PROMPT.trim() },
+    ...mapped
+  ];
+}
+
+async function generateTherapeuticReply({ sessionId, userMessage }) {
+  if (!process.env.OPENAI_API_KEY) {
+    return "I'm here with you. Tell me more about what's on your mind.";
+  }
+
+  const history = await getRecentChatForSession(sessionId, 14);
+  const messages = toOpenAIMessages(history);
+  // Add the latest user message at the end
+  messages.push({ role: 'user', content: userMessage });
+
+  const body = {
+    model: OPENAI_MODEL,
+    messages,
+    temperature: 0.7,
+    max_tokens: 220,
+    presence_penalty: 0.4,
+    frequency_penalty: 0.2
+  };
+
+  const resp = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(()=>'');
+    console.error('OpenAI error:', resp.status, text);
+    return "I'm here with you. Tell me more about what's on your mind.";
+  }
+
+  const data = await resp.json();
+  const reply = data?.choices?.[0]?.message?.content?.trim();
+  return reply || "I'm here with you. Tell me more about what's on your mind.";
+}
+
 app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
-    const { message, chatHistory, sessionId, consentedToAI } = req.body || {};
+    const { message, sessionId, consentedToAI } = req.body || {};
     if (!consentedToAI) {
-      return res.status(403).json({ success: false, error: 'AI processing consent required', message: 'AI processing consent required', requiresConsent: true });
+      return res.status(403).json({ success: false, error: 'AI processing consent required', requiresConsent: true });
     }
 
+    // Ensure session exists or create one
     let session = null;
     if (sessionId) {
       const s = await pool.query('SELECT * FROM chat_sessions WHERE id=$1 AND user_id=$2', [sessionId, req.user.userId]);
@@ -860,38 +865,30 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
       session = ins.rows[0];
     }
 
-    const sensitiveKeywords = ['suicide', 'self-harm', 'kill myself', 'medication', 'doctor', 'therapist'];
-    const containsSensitive = !!message && sensitiveKeywords.some(k => (message || '').toLowerCase().includes(k));
+    const sensitiveKeywords = ['suicide', 'self-harm', 'kill myself', 'kill myself.', 'medication', 'doctor', 'therapist'];
+    const containsSensitive = !!message && sensitiveKeywords.some(k => message.toLowerCase().includes(k));
 
+    // Store user message
     await pool.query(
       `INSERT INTO chat_messages (session_id, role, content, contains_sensitive_data, timestamp)
        VALUES ($1,'user',$2,$3,NOW())`,
       [session.id, message || '', containsSensitive]
     );
 
+    // Gamify: chat message
     const gamify = await trackAction(req.user.userId, 'chat_message');
 
-    // Optional personalization — pull from profile for firstName etc. (kept minimal here)
-    const userContext = {}; // e.g., { firstName: 'Griffen', recentMood: 7 }
+    // Generate AI response (or fallback)
+    const reply = await generateTherapeuticReply({ sessionId: session.id, userMessage: message || '' });
 
-    const safeHistory = Array.isArray(chatHistory)
-      ? chatHistory.filter(m => m && typeof m.content === 'string' && (m.role === 'user' || m.role === 'assistant')).slice(-8)
-      : [];
-
-    const assistantText = await generateLumaReply({
-      userMessage: message,
-      chatHistory: safeHistory,
-      userContext,
-      containsSensitive
-    });
-
+    // Store assistant message
     await pool.query(
       `INSERT INTO chat_messages (session_id, role, content, timestamp)
        VALUES ($1,'assistant',$2,NOW())`,
-      [session.id, assistantText]
+      [session.id, reply]
     );
 
-    res.json({ success: true, response: assistantText, sessionId: session.id, gamification: gamify });
+    res.json({ success: true, response: reply, sessionId: session.id, gamification: gamify });
   } catch (e) {
     console.error('Chat error:', e);
     res.status(500).json({ success: false, error: 'Server error' });
@@ -935,6 +932,7 @@ app.get('/api/gamify/progress', authenticateToken, async (req, res) => {
 /* =========================
    PRIVACY ROUTES
    ========================= */
+// Delete all data but keep the account
 app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
   const userId = req.user.userId;
   const client = await pool.connect();
@@ -945,11 +943,26 @@ app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
       `DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id=$1)`,
       [userId]
     );
-    const chatSessionDelete = await client.query(`DELETE FROM chat_sessions WHERE user_id=$1`, [userId]);
-    const moodDelete = await client.query(`DELETE FROM mood_entries WHERE user_id=$1`, [userId]);
-    const journalDelete = await client.query(`DELETE FROM journal_entries WHERE user_id=$1`, [userId]);
-    const badgesDelete = await client.query(`DELETE FROM user_badges WHERE user_id=$1`, [userId]);
-    const gamifyDelete = await client.query(`DELETE FROM gamification_progress WHERE user_id=$1`, [userId]);
+    const chatSessionDelete = await client.query(
+      `DELETE FROM chat_sessions WHERE user_id=$1`,
+      [userId]
+    );
+    const moodDelete = await client.query(
+      `DELETE FROM mood_entries WHERE user_id=$1`,
+      [userId]
+    );
+    const journalDelete = await client.query(
+      `DELETE FROM journal_entries WHERE user_id=$1`,
+      [userId]
+    );
+    const badgesDelete = await client.query(
+      `DELETE FROM user_badges WHERE user_id=$1`,
+      [userId]
+    );
+    const gamifyDelete = await client.query(
+      `DELETE FROM gamification_progress WHERE user_id=$1`,
+      [userId]
+    );
     const questionnaireReset = await client.query(
       `UPDATE questionnaire_responses
          SET completed=false,
@@ -986,6 +999,7 @@ app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
   } finally { client.release(); }
 });
 
+// Fully delete the account (cascades via FK)
 app.delete('/api/privacy/delete-account', authenticateToken, async (req, res) => {
   const userId = req.user.userId;
   const client = await pool.connect();
@@ -1039,7 +1053,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    version: '6.6.0 - Gamification + Privacy Delete + Luma AI',
+    version: '6.6.0 - OpenAI Chat + Privacy Delete',
     database: 'PostgreSQL',
     openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
     features: {
@@ -1048,7 +1062,7 @@ app.get('/health', (_req, res) => {
       gamification: 'XP/Streaks/Badges',
       deleteAllData: 'Available',
       deleteAccount: 'Available',
-      lumaAI: process.env.OPENAI_API_KEY ? 'On' : 'Fallback'
+      therapistAI: process.env.OPENAI_API_KEY ? 'On' : 'Off'
     },
     success: true
   });
@@ -1092,7 +1106,7 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`✅ Luma backend running on port ${PORT}`);
       console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
-      console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI GPT-4' : 'Fallback responses'}`);
+      console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI' : 'Fallback responses'}`);
       console.log('🧹 Privacy deletes: delete-all + delete-account enabled');
     });
   } catch (e) {
