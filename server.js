@@ -1,10 +1,5 @@
-// server.js — Luma Backend (hardened)
-// Paste into project root and replace your existing server.js
-
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
@@ -15,30 +10,24 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------- CORS (strict) ----------
-const allowlist = new Set([
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'http://localhost:8080',
-  'http://localhost:8100',
-  'capacitor://localhost',
-  'ionic://localhost',
-  'https://luma-backend-nfdc.onrender.com', // backend (for tools/debug)
-  // TODO: add your real production app/web front-end origin here:
-  // 'https://your-frontend.example'
-]);
-
+// CORS CONFIGURATION
 const corsOptions = {
-  origin(origin, callback) {
-    // Allow non-browser tools (no origin) and allowlisted origins
-    if (!origin || allowlist.has(origin)) return callback(null, true);
-    return callback(new Error(`CORS blocked for origin: ${origin}`), false);
-  },
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:3001', 
+    'https://luma-backend-nfdc.onrender.com',
+    'capacitor://localhost',
+    'ionic://localhost',
+    'http://localhost',
+    'http://localhost:8080',
+    'http://localhost:8100',
+    /^https?:\/\/.*$/
+  ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
     'Origin',
-    'X-Requested-With',
+    'X-Requested-With', 
     'Content-Type',
     'Accept',
     'Authorization',
@@ -46,64 +35,85 @@ const corsOptions = {
     'User-Agent'
   ],
   exposedHeaders: ['Authorization'],
+  preflightContinue: false,
   optionsSuccessStatus: 204
 };
 
-// ---------- Security / Parsing / Logging ----------
-app.use(helmet());
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
 
-app.use(express.json({ limit: '10mb' })); // no custom verify() — fewer false positives
-
-// Request logger (no sensitive fields in prod)
-const isProd = process.env.NODE_ENV === 'production';
-app.use((req, _res, next) => {
-  const safeBody = (() => {
-    if (!req.body || isProd) return undefined;
+// ENHANCED JSON PARSING WITH BETTER ERROR HANDLING
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf, encoding) => {
     try {
-      const clone = JSON.parse(JSON.stringify(req.body));
-      if (clone.password) clone.password = '***';
-      if (clone.newPassword) clone.newPassword = '***';
-      if (clone.token) clone.token = '***';
-      return clone;
-    } catch { return undefined; }
-  })();
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`, safeBody ? `\nBody: ${JSON.stringify(safeBody)}` : '');
+      JSON.parse(buf);
+    } catch (err) {
+      console.error('❌ JSON Parse Error:', err.message);
+      console.error('❌ Raw body:', buf.toString());
+      throw new Error('Invalid JSON in request body');
+    }
+  }
+}));
+
+// Log all request bodies for debugging
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.body) {
+    console.log('📥 Request Body Type:', typeof req.body);
+    console.log('📥 Request Body:', JSON.stringify(req.body, null, 2));
+  }
   next();
 });
 
-// Rate limit auth routes
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
-app.use('/api/auth/', authLimiter);
+app.options('*', cors(corsOptions));
 
-// ---------- JWT Secret ----------
-if (isProd && !process.env.JWT_SECRET) {
-  console.error('❌ JWT_SECRET is required in production');
-  process.exit(1);
-}
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-secret-change-me';
-
-// ---------- Email (Resend) ----------
-const resend = new Resend(process.env.RESEND_API_KEY);
-
-// ---------- PostgreSQL ----------
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: isProd ? { rejectUnauthorized: false } : false
+// Headers middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+  next();
 });
 
-// Ensure pgcrypto + tables + indexes
+// Logging middleware
+app.use((req, res, next) => {
+  console.log(${new Date().toISOString()} - ${req.method} ${req.path});
+  next();
+});
+
+// JWT Secret
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this';
+
+// Initialize Resend for email sending
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// PostgreSQL Connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Test database connection
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('❌ Error connecting to PostgreSQL:', err.stack);
+  } else {
+    console.log('✅ Connected to PostgreSQL database');
+    release();
+  }
+});
+
+// Initialize database tables
 async function initializeDatabase() {
-  const client = await pool.connect();
   try {
-    console.log('🗄️ Initializing database…');
-    await client.query('BEGIN');
-
-    // Needed for gen_random_uuid()
-    await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto;`);
-
-    await client.query(`
+    console.log('🗄️ Initializing database tables...');
+    
+    // Users table
+    await pool.query(
       CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(255) UNIQUE NOT NULL,
@@ -111,10 +121,11 @@ async function initializeDatabase() {
         password_hash VARCHAR(255) NOT NULL,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-    `);
+      )
+    );
 
-    await client.query(`
+    // User profiles - FIXED: Ensure data_purposes column is created properly
+    await pool.query(
       CREATE TABLE IF NOT EXISTS user_profiles (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -129,10 +140,11 @@ async function initializeDatabase() {
         data_purposes TEXT[] DEFAULT ARRAY['personalization','app_functionality'],
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-    `);
+      )
+    );
 
-    await client.query(`
+    // Password resets table
+    await pool.query(
       CREATE TABLE IF NOT EXISTS password_resets (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -141,10 +153,11 @@ async function initializeDatabase() {
         used BOOLEAN DEFAULT false,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         UNIQUE(user_id)
-      );
-    `);
+      )
+    );
 
-    await client.query(`
+    // Questionnaire responses - FIXED: Create with proper array handling
+    await pool.query(
       CREATE TABLE IF NOT EXISTS questionnaire_responses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -154,14 +167,25 @@ async function initializeDatabase() {
         main_goals TEXT[] DEFAULT ARRAY[]::TEXT[],
         communication_style VARCHAR(255),
         data_purpose VARCHAR(100) DEFAULT 'app_personalization',
-        consent_given BOOLEAN DEFAULT false,
         completed_at TIMESTAMP WITH TIME ZONE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-    `);
+      )
+    );
 
-    await client.query(`
+    // CRITICAL FIX: Add missing columns that may not exist
+    try {
+      await pool.query(
+        ALTER TABLE questionnaire_responses 
+        ADD COLUMN IF NOT EXISTS consent_given BOOLEAN DEFAULT false
+      );
+      console.log('✅ consent_given column ensured');
+    } catch (alterError) {
+      console.log('⚠️ Could not add consent_given column:', alterError.message);
+    }
+
+    // Mood entries
+    await pool.query(
       CREATE TABLE IF NOT EXISTS mood_entries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -170,10 +194,11 @@ async function initializeDatabase() {
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
         data_purpose VARCHAR(100) DEFAULT 'mood_tracking',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-    `);
+      )
+    );
 
-    await client.query(`
+    // Journal entries
+    await pool.query(
       CREATE TABLE IF NOT EXISTS journal_entries (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -182,10 +207,11 @@ async function initializeDatabase() {
         entry_date TIMESTAMP WITH TIME ZONE NOT NULL,
         data_purpose VARCHAR(100) DEFAULT 'journaling',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-    `);
+      )
+    );
 
-    await client.query(`
+    // Chat sessions
+    await pool.query(
       CREATE TABLE IF NOT EXISTS chat_sessions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -194,10 +220,11 @@ async function initializeDatabase() {
         user_context JSONB,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-    `);
+      )
+    );
 
-    await client.query(`
+    // Chat messages
+    await pool.query(
       CREATE TABLE IF NOT EXISTS chat_messages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         session_id UUID REFERENCES chat_sessions(id) ON DELETE CASCADE,
@@ -206,293 +233,677 @@ async function initializeDatabase() {
         contains_sensitive_data BOOLEAN DEFAULT false,
         timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-    `);
+      )
+    );
 
-    // Helpful indexes
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_profiles_user_id ON user_profiles(user_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_questionnaire_user_id ON questionnaire_responses(user_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_mood_user_id ON mood_entries(user_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_journal_user_id ON journal_entries(user_id);`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);`);
-
-    await client.query('COMMIT');
-    console.log('✅ Database tables & indexes ready');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('❌ DB init failed:', err);
-    throw err;
-  } finally {
-    client.release();
+    console.log('✅ Database tables initialized successfully');
+  } catch (error) {
+    console.error('❌ Error initializing database:', error);
+    throw error;
   }
 }
 
-// ---------- Auth middleware ----------
+// Authentication middleware
 const authenticateToken = (req, res, next) => {
-  const token = (req.headers['authorization'] || '').split(' ')[1];
-  if (!token) return res.status(401).json({ success: false, error: 'Access token required', message: 'Access token required' });
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ 
+      success: false,
+      error: 'Access token required',
+      message: 'Access token required'
+    });
+  }
+
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ success: false, error: 'Invalid or expired token', message: 'Invalid or expired token' });
+    if (err) {
+      return res.status(403).json({ 
+        success: false,
+        error: 'Invalid or expired token',
+        message: 'Invalid or expired token'
+      });
+    }
     req.user = user;
     next();
   });
 };
 
-// ---------- Email helper ----------
+// Email sending function using Resend
 async function sendPasswordResetEmail(email, resetToken, username) {
   try {
-    const resetLink = `luma://reset-password?token=${resetToken}`; // iOS deep link
+    const resetLink = luma://reset-password?token=${resetToken}; // Deep link for your iOS app
+    
     const { data, error } = await resend.emails.send({
-      from: 'Luma <onboard@resend.dev>', // use your verified domain in prod
+      from: 'Luma <onboard@resend.dev>', // Using Resend's test domain
       to: [email],
       subject: 'Reset Your Luma Password',
-      html: `
-        <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
-          <h1 style="color:#333;">Reset Your Password</h1>
-          <p>Hi ${username || 'there'},</p>
-          <p>You requested a password reset for your Luma account.</p>
-          <p><a href="${resetLink}" style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:12px 20px;border-radius:10px;text-decoration:none;display:inline-block;">Reset Password</a></p>
-          <p>Or use this code in the app: <code>${resetToken}</code></p>
-          <p style="color:#666;">This link expires in 1 hour.</p>
-        </div>`
+      html: 
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="text-align: center; margin-bottom: 40px;">
+            <div style="width: 60px; height: 60px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 20px;">
+              <span style="color: white; font-size: 24px; font-weight: bold;">L</span>
+            </div>
+            <h1 style="color: #333; margin: 0; font-size: 24px;">Reset Your Password</h1>
+          </div>
+          
+          <p style="color: #555; font-size: 16px; line-height: 1.5;">
+            Hi ${username},
+          </p>
+          
+          <p style="color: #555; font-size: 16px; line-height: 1.5;">
+            You requested a password reset for your Luma account. Tap the button below to create a new password:
+          </p>
+          
+          <div style="text-align: center; margin: 40px 0;">
+            <a href="${resetLink}" 
+               style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 32px; text-decoration: none; border-radius: 12px; display: inline-block; font-weight: 600; font-size: 16px;">
+              Reset Password
+            </a>
+          </div>
+          
+          <p style="color: #777; font-size: 14px; line-height: 1.5;">
+            Or copy and paste this code in the app: <code style="background: #f5f5f5; padding: 4px 8px; border-radius: 4px; font-family: monospace;">${resetToken}</code>
+          </p>
+          
+          <div style="background: #f8f9fa; border-radius: 8px; padding: 20px; margin: 30px 0;">
+            <p style="color: #666; font-size: 14px; margin: 0; line-height: 1.5;">
+              <strong>Security Note:</strong> This reset link will expire in 1 hour. If you didn't request this password reset, you can safely ignore this email.
+            </p>
+          </div>
+          
+          <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+          
+          <div style="text-align: center;">
+            <p style="color: #999; font-size: 12px; margin: 0;">
+              This email was sent by Luma - Your AI Mental Health Companion
+            </p>
+          </div>
+        </div>
+      
     });
+
     if (error) {
-      console.error('Resend error:', error);
+      console.error(❌ Resend email error for ${email}:, error);
       return false;
     }
-    console.log(`✅ Reset email sent to ${email} (id: ${data.id})`);
+
+    console.log(✅ Password reset email sent to ${email} (ID: ${data.id}));
     return true;
-  } catch (e) {
-    console.error('Email send failed:', e);
+  } catch (error) {
+    console.error(❌ Failed to send password reset email to ${email}:, error);
     return false;
   }
 }
 
-// ---------- Routes (same behavior, safer defaults) ----------
-
-// Register
+// FIXED USER REGISTRATION
 app.post('/api/auth/register', async (req, res) => {
+  console.log('🚀 Registration request started');
+  console.log('📝 Request body:', req.body);
+  console.log('📝 Content-Type:', req.headers['content-type']);
+  
   const client = await pool.connect();
+  
   try {
-    const { username, email, password } = req.body || {};
-    if (!username || !email || !password) {
-      return res.status(400).json({ success: false, error: 'Username, email, and password are required', message: 'Username, email, and password are required' });
-    }
-    if (password.length < 6) return res.status(400).json({ success: false, error: 'Password must be at least 6 characters', message: 'Password must be at least 6 characters' });
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) return res.status(400).json({ success: false, error: 'Please enter a valid email address', message: 'Please enter a valid email address' });
+    const { username, email, password } = req.body;
+    
+    console.log('📝 Extracted values:', { username, email, passwordLength: password?.length });
 
-    const exists = await client.query(
-      'SELECT id, username, email FROM users WHERE LOWER(username)=LOWER($1) OR LOWER(email)=LOWER($2)',
-      [username, email]
-    );
-    if (exists.rows.length) {
-      const ex = exists.rows[0];
-      return res.status(400).json({
+    // Input validation with detailed logging
+    if (!username || !email || !password) {
+      console.log('❌ Missing required fields:', { username: !!username, email: !!email, password: !!password });
+      return res.status(400).json({ 
         success: false,
-        error: ex.username.toLowerCase() === username.toLowerCase() ? 'Username already exists' : 'Email already exists',
-        message: ex.username.toLowerCase() === username.toLowerCase() ? 'Username already exists' : 'Email already exists'
+        error: 'Username, email, and password are required',
+        message: 'Username, email, and password are required',
+        debug: { username: !!username, email: !!email, password: !!password }
       });
     }
 
-    const hash = await bcrypt.hash(password, 10);
+    if (password.length < 6) {
+      console.log('❌ Password too short:', password.length);
+      return res.status(400).json({ 
+        success: false,
+        error: 'Password must be at least 6 characters',
+        message: 'Password must be at least 6 characters'
+      });
+    }
 
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      console.log('❌ Invalid email format:', email);
+      return res.status(400).json({ 
+        success: false,
+        error: 'Please enter a valid email address',
+        message: 'Please enter a valid email address'
+      });
+    }
+
+    console.log('✅ Input validation passed');
+
+    // Check if user already exists
+    console.log('🔍 Checking for existing user...');
+    const existingUser = await client.query(
+      'SELECT id, username, email FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
+      [username, email]
+    );
+
+    console.log('📊 Existing user check result:', existingUser.rows.length, 'users found');
+
+    if (existingUser.rows.length > 0) {
+      const existing = existingUser.rows[0];
+      console.log('❌ User already exists:', existing);
+      
+      if (existing.username.toLowerCase() === username.toLowerCase()) {
+        return res.status(400).json({ 
+          success: false,
+          error: 'Username already exists',
+          message: 'Username already exists'
+        });
+      } else {
+        return res.status(400).json({ 
+          success: false,
+          error: 'Email already exists',
+          message: 'Email already exists'
+        });
+      }
+    }
+
+    console.log('✅ No existing user found, proceeding with registration');
+
+    // Hash password
+    console.log('🔐 Hashing password...');
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    console.log('✅ Password hashed successfully');
+
+    // Start transaction
+    console.log('🗄️ Starting database transaction...');
     await client.query('BEGIN');
-    const userResult = await client.query(
-      'INSERT INTO users (username, email, password_hash) VALUES ($1,$2,$3) RETURNING id,username,email,created_at',
-      [username, email, hash]
-    );
-    const user = userResult.rows[0];
+    console.log('✅ Transaction started');
+    
+    try {
+      // Create user
+      console.log('👤 Creating user record...');
+      const userResult = await client.query(
+        'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email, created_at',
+        [username, email, hashedPassword]
+      );
 
-    await client.query(
-      `INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes)
-       VALUES ($1,$2,$3,NOW(),$4,$5,$6,$7,$8,$9)`,
-      [user.id, '', '', '#800080', true, false, false, '19:00:00', ['personalization','app_functionality']]
-    );
+      const newUser = userResult.rows[0];
+      console.log('✅ User created with ID:', newUser.id);
 
-    await client.query(
-      `INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [user.id, false, '', '', [], '', 'app_personalization', false]
-    );
+      // Create user profile with fixed array syntax
+      console.log('📋 Creating user profile...');
+      const profileResult = await client.query(
+        INSERT INTO user_profiles (user_id, first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes) 
+         VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9) RETURNING id,
+        [newUser.id, '', '', '#800080', true, false, false, '19:00:00', ['personalization', 'app_functionality']]
+      );
+      console.log('✅ User profile created with ID:', profileResult.rows[0].id);
 
-    await client.query('COMMIT');
+      // Create questionnaire response with fixed array syntax
+      console.log('📝 Creating questionnaire record...');
+      const questionnaireResult = await client.query(
+        INSERT INTO questionnaire_responses (user_id, completed, first_name, pronouns, main_goals, communication_style, data_purpose, consent_given) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id,
+        [newUser.id, false, '', '', [], '', 'app_personalization', false]
+      );
+      console.log('✅ Questionnaire record created with ID:', questionnaireResult.rows[0].id);
 
-    const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+      // Commit transaction
+      await client.query('COMMIT');
+      console.log('✅ Transaction committed successfully');
+      
+      // Generate JWT token
+      console.log('🔑 Generating JWT token...');
+      const token = jwt.sign(
+        { userId: newUser.id, username: newUser.username },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+      console.log('✅ JWT token generated');
 
-    res.status(200).json({ success: true, message: 'User registered successfully', token, user: { id: user.id, username: user.username, email: user.email } });
+      console.log('🎉 Registration completed successfully for:', newUser.username);
+
+      res.status(200).json({
+        success: true,
+        message: 'User registered successfully',
+        token: token,
+        user: {
+          id: newUser.id,
+          username: newUser.username,
+          email: newUser.email
+        }
+      });
+
+    } catch (transactionError) {
+      console.log('💥 Transaction error occurred:', transactionError.message);
+      console.log('💥 Error code:', transactionError.code);
+      console.log('💥 Error detail:', transactionError.detail);
+      
+      await client.query('ROLLBACK');
+      console.log('🔄 Transaction rolled back');
+      throw transactionError;
+    }
+
   } catch (error) {
-    await pool.query('ROLLBACK');
-    let msg = 'Server error during registration', status = 500;
-    if (error.code === '23505') { msg = 'User already exists'; status = 400; }
-    res.status(status).json({ success: false, error: msg, message: msg });
+    console.error('💥 REGISTRATION ERROR:', error.message);
+    console.error('💥 Error stack:', error.stack);
+    console.error('💥 Error code:', error.code);
+    console.error('💥 Error detail:', error.detail);
+    
+    // Provide more specific error messages
+    let errorMessage = 'Server error during registration';
+    let statusCode = 500;
+    
+    if (error.code === '23505') { // PostgreSQL unique violation
+      if (error.detail && error.detail.includes('username')) {
+        errorMessage = 'Username already exists';
+      } else if (error.detail && error.detail.includes('email')) {
+        errorMessage = 'Email already exists';
+      } else {
+        errorMessage = 'User already exists';
+      }
+      statusCode = 400;
+    } else if (error.code === '23503') { // Foreign key violation
+      errorMessage = 'Database constraint error';
+      statusCode = 400;
+    } else if (error.code === '23514') { // Check constraint violation
+      errorMessage = 'Invalid data provided';
+      statusCode = 400;
+    } else if (error.code === '42703') { // Column does not exist
+      errorMessage = 'Database schema error';
+      statusCode = 500;
+    } else if (error.code === '42601') { // Syntax error
+      errorMessage = 'Database query error';
+      statusCode = 500;
+    }
+    
+    res.status(statusCode).json({
+      success: false,
+      error: errorMessage,
+      message: errorMessage,
+      debug: process.env.NODE_ENV === 'development' ? {
+        code: error.code,
+        detail: error.detail,
+        message: error.message
+      } : undefined
+    });
   } finally {
     client.release();
+    console.log('🔌 Database client released');
   }
 });
 
-// Login
+// USER LOGIN
 app.post('/api/auth/login', async (req, res) => {
+  console.log('🔐 Login request started');
+  
   try {
-    const { username, password } = req.body || {};
-    if (!username || !password) return res.status(400).json({ success: false, error: 'Username and password are required', message: 'Username and password are required' });
+    const { username, password } = req.body;
 
-    const result = await pool.query(
-      'SELECT id, username, email, password_hash FROM users WHERE LOWER(username)=LOWER($1) OR LOWER(email)=LOWER($1)',
+    if (!username || !password) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Username and password are required',
+        message: 'Username and password are required'
+      });
+    }
+
+    console.log('🔍 Looking up user:', username);
+
+    // Enhanced user lookup with case-insensitive matching
+    const userResult = await pool.query(
+      'SELECT id, username, email, password_hash, created_at FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($1)',
       [username]
     );
-    if (!result.rows.length) return res.status(401).json({ success: false, error: 'Invalid credentials', message: 'Invalid credentials' });
+    
+    console.log('📊 Query results: Found', userResult.rows.length, 'users');
+    
+    if (userResult.rows.length > 0) {
+      console.log('✅ Found user:', userResult.rows[0].username);
+    } else {
+      console.log('❌ No user found for:', username);
+    }
 
-    const user = result.rows[0];
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ success: false, error: 'Invalid credentials', message: 'Invalid credentials' });
-
-    const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ success: true, message: 'Login successful', token, user: { id: user.id, username: user.username, email: user.email } });
-  } catch (e) {
-    console.error('Login error:', e);
-    res.status(500).json({ success: false, error: 'Server error during login', message: 'Server error during login' });
-  }
-});
-
-// Forgot password
-app.post('/api/auth/forgot-password', async (req, res) => {
-  try {
-    const { email } = req.body || {};
-    if (!email) return res.status(400).json({ success: false, error: 'Email is required', message: 'Email is required' });
-
-    const userResult = await pool.query('SELECT id, username, email FROM users WHERE LOWER(email)=LOWER($1)', [email]);
-    if (!userResult.rows.length) {
-      return res.json({ success: true, message: "If an account with that email exists, we've sent password reset instructions." });
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ 
+        success: false,
+        error: 'Invalid credentials',
+        message: 'Invalid credentials'
+      });
     }
 
     const user = userResult.rows[0];
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    const resetExpires = new Date(Date.now() + 3600000);
 
-    await pool.query(
-      `INSERT INTO password_resets (user_id, reset_token, expires_at, created_at)
-       VALUES ($1,$2,$3,NOW())
-       ON CONFLICT (user_id) DO UPDATE SET reset_token=$2, expires_at=$3, created_at=NOW(), used=false`,
-      [user.id, resetToken, resetExpires]
-    );
-
-    if (process.env.RESEND_API_KEY) {
-      const ok = await sendPasswordResetEmail(email, resetToken, user.username);
-      if (ok) return res.json({ success: true, message: 'Password reset instructions have been sent to your email address.' });
+    // Check password
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    if (!isValidPassword) {
+      console.log('❌ Invalid password for user:', user.username);
+      return res.status(401).json({ 
+        success: false,
+        error: 'Invalid credentials',
+        message: 'Invalid credentials'
+      });
     }
 
-    // Dev fallback (no email service)
-    res.json({
+    console.log('✅ Password verified for user:', user.username);
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: user.id, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    console.log('✅ Login successful for:', user.username);
+
+    res.status(200).json({
       success: true,
-      message: "If an account with that email exists, we've sent password reset instructions.",
-      ...(isProd ? {} : { developmentToken: resetToken })
+      message: 'Login successful',
+      token: token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email
+      }
     });
-  } catch (e) {
-    console.error('Forgot-password error:', e);
-    res.status(500).json({ success: false, error: 'Server error', message: 'Server error occurred. Please try again.' });
+
+  } catch (error) {
+    console.error('💥 LOGIN ERROR:', error);
+    
+    res.status(500).json({
+      success: false,
+      error: 'Server error during login',
+      message: 'Server error during login'
+    });
   }
 });
 
-// Reset password
+// PASSWORD RESET REQUEST
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required',
+        message: 'Email is required'
+      });
+    }
+    
+    console.log('🔐 Password reset requested for:', email);
+    
+    // Check if user exists
+    const userResult = await pool.query(
+      'SELECT id, username, email FROM users WHERE LOWER(email) = LOWER($1)',
+      [email]
+    );
+    
+    if (userResult.rows.length === 0) {
+      // Still return success for security (don't reveal if email exists)
+      return res.json({
+        success: true,
+        message: 'If an account with that email exists, we\'ve sent password reset instructions.'
+      });
+    }
+    
+    const user = userResult.rows[0];
+    
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetExpires = new Date(Date.now() + 3600000); // 1 hour
+    
+    // Save reset token to database
+    await pool.query(
+      INSERT INTO password_resets (user_id, reset_token, expires_at, created_at) 
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (user_id) 
+       DO UPDATE SET reset_token = $2, expires_at = $3, created_at = NOW(), used = false,
+      [user.id, resetToken, resetExpires]
+    );
+    
+    console.log(🔑 Reset token generated for ${email}: ${resetToken});
+    
+    // Send email if Resend API key is configured
+    if (process.env.RESEND_API_KEY) {
+      const emailSent = await sendPasswordResetEmail(email, resetToken, user.username || 'User');
+      
+      if (emailSent) {
+        res.json({
+          success: true,
+          message: 'Password reset instructions have been sent to your email address.'
+        });
+      } else {
+        // Still return success but log the error internally
+        console.error('Email sending failed, but user will see success message');
+        res.json({
+          success: true,
+          message: 'If an account with that email exists, we\'ve sent password reset instructions.',
+          // Include token in development mode as fallback
+          ...(process.env.NODE_ENV !== 'production' && { developmentToken: resetToken })
+        });
+      }
+    } else {
+      // No email service configured - development mode
+      console.log('⚠️ No RESEND_API_KEY configured, returning token for development');
+      res.json({
+        success: true,
+        message: 'If an account with that email exists, we\'ve sent password reset instructions.',
+        developmentToken: resetToken // REMOVE IN PRODUCTION
+      });
+    }
+    
+  } catch (error) {
+    console.error('Password reset request error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error',
+      message: 'Server error occurred. Please try again.'
+    });
+  }
+});
+
+// PASSWORD RESET CONFIRMATION
 app.post('/api/auth/reset-password', async (req, res) => {
   try {
-    const { token, newPassword } = req.body || {};
-    if (!token || !newPassword) return res.status(400).json({ success: false, error: 'Token and new password are required', message: 'Token and new password are required' });
-    if (newPassword.length < 6) return res.status(400).json({ success: false, error: 'Password must be at least 6 characters', message: 'Password must be at least 6 characters' });
-
-    const reset = await pool.query(
-      `SELECT pr.*, u.id as user_id, u.username
-       FROM password_resets pr JOIN users u ON pr.user_id=u.id
-       WHERE pr.reset_token=$1 AND pr.expires_at>NOW() AND pr.used=false`,
+    const { token, newPassword } = req.body;
+    
+    if (!token || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        error: 'Token and new password are required',
+        message: 'Token and new password are required'
+      });
+    }
+    
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password must be at least 6 characters',
+        message: 'Password must be at least 6 characters'
+      });
+    }
+    
+    // Find valid reset token
+    const resetResult = await pool.query(
+      SELECT pr.*, u.id as user_id, u.username 
+       FROM password_resets pr 
+       JOIN users u ON pr.user_id = u.id 
+       WHERE pr.reset_token = $1 AND pr.expires_at > NOW() AND pr.used = false,
       [token]
     );
-    if (!reset.rows.length) return res.status(400).json({ success: false, error: 'Invalid or expired reset token', message: 'Invalid or expired reset token' });
-
-    const record = reset.rows[0];
-    const hash = await bcrypt.hash(newPassword, 10);
-
+    
+    if (resetResult.rows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or expired reset token',
+        message: 'Invalid or expired reset token'
+      });
+    }
+    
+    const resetRecord = resetResult.rows[0];
+    
+    // Hash new password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+    
+    // Update password and mark token as used
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2', [hash, record.user_id]);
-      await client.query('UPDATE password_resets SET used=true WHERE id=$1', [record.id]);
+      
+      await client.query(
+        'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+        [hashedPassword, resetRecord.user_id]
+      );
+      
+      await client.query(
+        'UPDATE password_resets SET used = true WHERE id = $1',
+        [resetRecord.id]
+      );
+      
       await client.query('COMMIT');
-    } catch (e) {
-      await client.query('ROLLBACK'); throw e;
+      
+      console.log('✅ Password reset successful for user:', resetRecord.username);
+      
+      res.json({
+        success: true,
+        message: 'Password reset successful. You can now log in with your new password.'
+      });
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     } finally {
       client.release();
     }
-
-    res.json({ success: true, message: 'Password reset successful. You can now log in with your new password.' });
-  } catch (e) {
-    console.error('Reset-password error:', e);
-    res.status(500).json({ success: false, error: 'Server error', message: 'Server error' });
+    
+  } catch (error) {
+    console.error('Password reset error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error',
+      message: 'Server error'
+    });
   }
 });
 
-// Me
+// GET CURRENT USER
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
-    const r = await pool.query('SELECT id, username, email, created_at FROM users WHERE id=$1', [req.user.userId]);
-    if (!r.rows.length) return res.status(404).json({ success: false, error: 'User not found', message: 'User not found' });
-    res.json({ success: true, ...r.rows[0] });
-  } catch (e) {
-    console.error('Get me error:', e);
-    res.status(500).json({ success: false, error: 'Server error', message: 'Server error' });
+    const userResult = await pool.query(
+      'SELECT id, username, email, created_at FROM users WHERE id = $1',
+      [req.user.userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'User not found',
+        message: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      ...userResult.rows[0]
+    });
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Server error',
+      message: 'Server error'
+    });
   }
 });
 
-app.post('/api/auth/logout', authenticateToken, (_req, res) => {
-  res.json({ success: true, message: 'Logged out successfully' });
+// LOGOUT
+app.post('/api/auth/logout', authenticateToken, (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Logged out successfully' 
+  });
 });
 
-// Questionnaire
+// QUESTIONNAIRE ENDPOINTS
 app.get('/api/questionnaire', authenticateToken, async (req, res) => {
   try {
-    const r = await pool.query('SELECT * FROM questionnaire_responses WHERE user_id=$1', [req.user.userId]);
-    if (!r.rows.length) {
-      return res.json({ success: true, completed: false, responses: { firstName: "", pronouns: "", mainGoals: [], communicationStyle: "" } });
+    const questionnaireResult = await pool.query(
+      'SELECT * FROM questionnaire_responses WHERE user_id = $1',
+      [req.user.userId]
+    );
+    
+    if (questionnaireResult.rows.length === 0) {
+      return res.json({ 
+        success: true,
+        completed: false, 
+        responses: {
+          firstName: "",
+          pronouns: "",
+          mainGoals: [],
+          communicationStyle: ""
+        } 
+      });
     }
-    const q = r.rows[0];
+    
+    const questionnaire = questionnaireResult.rows[0];
     res.json({
       success: true,
-      completed: q.completed,
+      completed: questionnaire.completed,
       responses: {
-        firstName: q.first_name || "",
-        pronouns: q.pronouns || "",
-        mainGoals: q.main_goals || [],
-        communicationStyle: q.communication_style || ""
+        firstName: questionnaire.first_name || "",
+        pronouns: questionnaire.pronouns || "",
+        mainGoals: questionnaire.main_goals || [],
+        communicationStyle: questionnaire.communication_style || ""
       },
-      completedAt: q.completed_at
+      completedAt: questionnaire.completed_at
     });
-  } catch (e) {
-    console.error('Questionnaire load error:', e);
-    res.status(500).json({ success: false, error: 'Failed to load questionnaire', message: 'Failed to load questionnaire' });
+  } catch (error) {
+    console.error('Questionnaire load error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to load questionnaire',
+      message: 'Failed to load questionnaire'
+    });
   }
 });
 
 app.post('/api/questionnaire', authenticateToken, async (req, res) => {
   try {
-    const { responses } = req.body || {};
+    const { responses } = req.body;
+    
     if (!responses || typeof responses !== 'object') {
-      return res.status(400).json({ success: false, error: 'Invalid questionnaire responses', message: 'Invalid questionnaire responses' });
+      return res.status(400).json({ 
+        success: false,
+        error: 'Invalid questionnaire responses',
+        message: 'Invalid questionnaire responses'
+      });
     }
+
+    console.log('📝 Saving questionnaire for user:', req.user.userId);
+    console.log('📝 Questionnaire data:', responses);
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      
+      // Update questionnaire responses
       await client.query(
-        `UPDATE questionnaire_responses
-         SET completed=true,
-             first_name=$1,
-             pronouns=$2,
-             main_goals=$3,
-             communication_style=$4,
-             data_purpose=$5,
-             consent_given=$6,
-             completed_at=NOW(),
-             updated_at=NOW()
-         WHERE user_id=$7`,
+        UPDATE questionnaire_responses 
+         SET completed = true, 
+             first_name = $1, 
+             pronouns = $2, 
+             main_goals = $3, 
+             communication_style = $4, 
+             data_purpose = $5,
+             consent_given = $6,
+             completed_at = NOW(),
+             updated_at = NOW()
+         WHERE user_id = $7,
         [
           responses.firstName || "",
           responses.pronouns || "",
@@ -503,76 +914,133 @@ app.post('/api/questionnaire', authenticateToken, async (req, res) => {
           req.user.userId
         ]
       );
-      await client.query(
-        `UPDATE user_profiles
-         SET first_name=$1, pronouns=$2, updated_at=NOW()
-         WHERE user_id=$3`,
+
+      // Also update user profile with questionnaire data
+      console.log('📝 Updating user profile with name:', responses.firstName);
+      const profileUpdateResult = await client.query(
+        UPDATE user_profiles 
+         SET first_name = $1, 
+             pronouns = $2, 
+             updated_at = NOW()
+         WHERE user_id = $3
+         RETURNING first_name, pronouns,
         [responses.firstName || "", responses.pronouns || "", req.user.userId]
       );
+
+      console.log('✅ Profile updated successfully:', profileUpdateResult.rows[0]);
+      
       await client.query('COMMIT');
-      res.json({ success: true, message: 'Questionnaire completed successfully' });
-    } catch (e) {
-      await client.query('ROLLBACK'); throw e;
-    } finally { client.release(); }
-  } catch (e) {
-    console.error('Questionnaire save error:', e);
-    res.status(500).json({ success: false, error: 'Failed to save questionnaire', message: 'Failed to save questionnaire' });
+      
+      res.json({ 
+        success: true, 
+        message: 'Questionnaire completed successfully' 
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Questionnaire save error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to save questionnaire',
+      message: 'Failed to save questionnaire'
+    });
   }
 });
 
-// Profile
+// PROFILE ENDPOINTS
 app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
-    const r = await pool.query('SELECT * FROM user_profiles WHERE user_id=$1', [req.user.userId]);
-    if (!r.rows.length) return res.status(404).json({ success: false, error: 'Profile not found', message: 'Profile not found' });
-    const p = r.rows[0];
+    console.log('📋 Loading profile for user:', req.user.userId);
+    
+    const profileResult = await pool.query(
+      'SELECT * FROM user_profiles WHERE user_id = $1',
+      [req.user.userId]
+    );
+    
+    if (profileResult.rows.length === 0) {
+      console.log('❌ No profile found for user:', req.user.userId);
+      return res.status(404).json({ 
+        success: false,
+        error: 'Profile not found',
+        message: 'Profile not found'
+      });
+    }
+    
+    const profile = profileResult.rows[0];
+    console.log('✅ Profile loaded:', { firstName: profile.first_name, pronouns: profile.pronouns });
+    
     res.json({
       success: true,
-      firstName: p.first_name || "",
-      pronouns: p.pronouns || "",
-      joinDate: p.join_date,
-      profileColorHex: p.profile_color_hex || "#800080",
-      notifications: p.notifications,
-      biometricAuth: p.biometric_auth,
-      darkMode: p.dark_mode,
-      reminderTime: p.reminder_time,
-      dataPurposes: p.data_purposes || []
+      firstName: profile.first_name || "",
+      pronouns: profile.pronouns || "",
+      joinDate: profile.join_date,
+      profileColorHex: profile.profile_color_hex || "#800080",
+      notifications: profile.notifications,
+      biometricAuth: profile.biometric_auth,
+      darkMode: profile.dark_mode,
+      reminderTime: profile.reminder_time,
+      dataPurposes: profile.data_purposes || []
     });
-  } catch (e) {
-    console.error('Profile load error:', e);
-    res.status(500).json({ success: false, error: 'Failed to load profile', message: 'Failed to load profile' });
+  } catch (error) {
+    console.error('Profile load error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to load profile',
+      message: 'Failed to load profile'
+    });
   }
 });
 
 app.post('/api/profile', authenticateToken, async (req, res) => {
   try {
-    const {
-      firstName, pronouns, joinDate, profileColorHex,
-      notifications, biometricAuth, darkMode, reminderTime, dataPurposes
-    } = req.body || {};
-
-    let dataArray = ['personalization', 'app_functionality'];
-    if (Array.isArray(dataPurposes)) dataArray = dataPurposes;
-    else if (typeof dataPurposes === 'string') dataArray = [dataPurposes];
-
-    const r = await pool.query(
-      `UPDATE user_profiles
-       SET first_name=$1,
-           pronouns=$2,
-           join_date=COALESCE($3, join_date),
-           profile_color_hex=COALESCE($4, profile_color_hex),
-           notifications=COALESCE($5, notifications),
-           biometric_auth=COALESCE($6, biometric_auth),
-           dark_mode=COALESCE($7, dark_mode),
-           reminder_time=COALESCE($8, reminder_time),
-           data_purposes=$9,
-           updated_at=NOW()
-       WHERE user_id=$10
-       RETURNING first_name, pronouns, join_date, profile_color_hex, notifications, biometric_auth, dark_mode, reminder_time, data_purposes`,
+    console.log('📝 Updating profile for user:', req.user.userId);
+    console.log('📝 Profile data received:', req.body);
+    
+    const { 
+      firstName,
+      pronouns,
+      joinDate, 
+      profileColorHex, 
+      notifications, 
+      biometricAuth, 
+      darkMode, 
+      reminderTime,
+      dataPurposes  
+    } = req.body;
+    
+    // Handle the array properly for PostgreSQL
+    let dataArray = ['personalization', 'app_functionality']; // Default values
+    
+    if (Array.isArray(dataPurposes)) {
+      dataArray = dataPurposes;
+    } else if (typeof dataPurposes === 'string') {
+      dataArray = [dataPurposes];
+    }
+    
+    console.log('📝 Processed data_purposes array:', dataArray);
+    
+    const updateResult = await pool.query(
+      UPDATE user_profiles 
+       SET first_name = $1, 
+           pronouns = $2, 
+           join_date = COALESCE($3, join_date),
+           profile_color_hex = COALESCE($4, profile_color_hex),
+           notifications = COALESCE($5, notifications),
+           biometric_auth = COALESCE($6, biometric_auth),
+           dark_mode = COALESCE($7, dark_mode),
+           reminder_time = COALESCE($8, reminder_time),
+           data_purposes = $9,
+           updated_at = NOW()
+       WHERE user_id = $10
+       RETURNING first_name, pronouns, data_purposes,
       [
         firstName || "",
         pronouns || "",
-        joinDate || null,
+        joinDate,
         profileColorHex || "#800080",
         notifications !== undefined ? notifications : true,
         biometricAuth !== undefined ? biometricAuth : false,
@@ -582,176 +1050,203 @@ app.post('/api/profile', authenticateToken, async (req, res) => {
         req.user.userId
       ]
     );
-
-    res.json({ success: true, message: 'Profile updated successfully', profile: r.rows[0] });
-  } catch (e) {
-    console.error('Profile save error:', e);
-    res.status(500).json({ success: false, error: 'Failed to save profile', message: 'Failed to save profile' });
+    
+    console.log('✅ Profile updated successfully:', updateResult.rows[0]);
+    
+    res.json({ 
+      success: true, 
+      message: 'Profile updated successfully',
+      profile: updateResult.rows[0]
+    });
+  } catch (error) {
+    console.error('💥 Profile save error:', error);
+    console.error('💥 Error details:', error.message);
+    console.error('💥 Error code:', error.code);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to save profile',
+      message: 'Failed to save profile',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
-// Mood
+// MOOD ENDPOINTS
 app.get('/api/mood', authenticateToken, async (req, res) => {
   try {
-    const r = await pool.query(
-      'SELECT id, mood, note, entry_date as date, data_purpose FROM mood_entries WHERE user_id=$1 ORDER BY entry_date DESC',
+    const moodResult = await pool.query(
+      'SELECT id, mood, note, entry_date as date, data_purpose FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC',
       [req.user.userId]
     );
-    res.json({ success: true, data: r.rows });
-  } catch (e) {
-    console.error('Mood load error:', e);
-    res.status(500).json({ success: false, error: 'Failed to load mood entries', message: 'Failed to load mood entries' });
+    
+    res.json({
+      success: true,
+      data: moodResult.rows
+    });
+  } catch (error) {
+    console.error('Mood load error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to load mood entries',
+      message: 'Failed to load mood entries'
+    });
   }
 });
 
 app.post('/api/mood', authenticateToken, async (req, res) => {
   try {
-    const { mood, note, date, dataPurpose = 'mood_tracking' } = req.body || {};
-    if (!mood || !date) return res.status(400).json({ success: false, error: 'Mood and date are required', message: 'Mood and date are required' });
-    if (mood < 1 || mood > 10) return res.status(400).json({ success: false, error: 'Mood must be between 1 and 10', message: 'Mood must be between 1 and 10' });
-
-    const r = await pool.query(
-      'INSERT INTO mood_entries (user_id, mood, note, entry_date, data_purpose) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-      [req.user.userId, parseInt(mood, 10), note || null, date, dataPurpose]
+    const { mood, note, date, dataPurpose = 'mood_tracking' } = req.body;
+    
+    if (!mood || !date) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Mood and date are required',
+        message: 'Mood and date are required'
+      });
+    }
+    
+    if (mood < 1 || mood > 10) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Mood must be between 1 and 10',
+        message: 'Mood must be between 1 and 10'
+      });
+    }
+    
+    const moodResult = await pool.query(
+      'INSERT INTO mood_entries (user_id, mood, note, entry_date, data_purpose) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [req.user.userId, parseInt(mood), note || null, date, dataPurpose]
     );
-    res.json({ success: true, message: 'Mood entry saved successfully', entry: r.rows[0] });
-  } catch (e) {
-    console.error('Mood save error:', e);
-    res.status(500).json({ success: false, error: 'Failed to save mood entry', message: 'Failed to save mood entry' });
+    
+    res.json({ 
+      success: true, 
+      message: 'Mood entry saved successfully',
+      entry: moodResult.rows[0]
+    });
+  } catch (error) {
+    console.error('Mood save error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to save mood entry',
+      message: 'Failed to save mood entry'
+    });
   }
 });
 
-// Journal
+// JOURNAL ENDPOINTS
 app.get('/api/journal', authenticateToken, async (req, res) => {
   try {
-    const r = await pool.query(
-      'SELECT id, content, prompt, entry_date as date, data_purpose FROM journal_entries WHERE user_id=$1 ORDER BY entry_date DESC',
+    const journalResult = await pool.query(
+      'SELECT id, content, prompt, entry_date as date, data_purpose FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC',
       [req.user.userId]
     );
-    res.json({ success: true, data: r.rows });
-  } catch (e) {
-    console.error('Journal load error:', e);
-    res.status(500).json({ success: false, error: 'Failed to load journal entries', message: 'Failed to load journal entries' });
+    
+    res.json({
+      success: true,
+      data: journalResult.rows
+    });
+  } catch (error) {
+    console.error('Journal load error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to load journal entries',
+      message: 'Failed to load journal entries'
+    });
   }
 });
 
 app.post('/api/journal', authenticateToken, async (req, res) => {
   try {
-    const { content, prompt, date, dataPurpose = 'journaling' } = req.body || {};
-    if (!content || !date) return res.status(400).json({ success: false, error: 'Content and date are required', message: 'Content and date are required' });
-    if (content.trim().length === 0) return res.status(400).json({ success: false, error: 'Content cannot be empty', message: 'Content cannot be empty' });
-
-    const r = await pool.query(
-      'INSERT INTO journal_entries (user_id, content, prompt, entry_date, data_purpose) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+    const { content, prompt, date, dataPurpose = 'journaling' } = req.body;
+    
+    if (!content || !date) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Content and date are required',
+        message: 'Content and date are required'
+      });
+    }
+    
+    if (content.trim().length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Content cannot be empty',
+        message: 'Content cannot be empty'
+      });
+    }
+    
+    const journalResult = await pool.query(
+      'INSERT INTO journal_entries (user_id, content, prompt, entry_date, data_purpose) VALUES ($1, $2, $3, $4, $5) RETURNING *',
       [req.user.userId, content.trim(), prompt || null, date, dataPurpose]
     );
-    res.json({ success: true, message: 'Journal entry saved successfully', entry: r.rows[0] });
-  } catch (e) {
-    console.error('Journal save error:', e);
-    res.status(500).json({ success: false, error: 'Failed to save journal entry', message: 'Failed to save journal entry' });
+    
+    res.json({ 
+      success: true, 
+      message: 'Journal entry saved successfully',
+      entry: journalResult.rows[0]
+    });
+  } catch (error) {
+    console.error('Journal save error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to save journal entry',
+      message: 'Failed to save journal entry'
+    });
   }
 });
 
-// ----- Chat helpers: prompt & fallback (unchanged logic, trimmed) -----
-function analyzeMoodTrend(moods) {
-  if (moods.length < 2) return 'insufficient data';
-  const recent = moods.slice(0, 3).map(m => m.mood);
-  const older = moods.slice(3, 6).map(m => m.mood);
-  if (!older.length) return 'stable';
-  const rAvg = recent.reduce((a,b)=>a+b,0)/recent.length;
-  const oAvg = older.reduce((a,b)=>a+b,0)/older.length;
-  const d = rAvg - oAvg;
-  if (d > 1) return 'improving';
-  if (d < -1) return 'declining';
-  return 'stable';
-}
-
-function extractJournalThemes(content) {
-  const t = new Set();
-  const c = (content || '').toLowerCase();
-  if (/(stress|anxious|worried)/.test(c)) t.add('stress/anxiety');
-  if (/(sad|depressed|down)/.test(c)) t.add('sadness');
-  if (/(happy|joy|excited)/.test(c)) t.add('happiness');
-  if (/(angry|frustrated|irritated)/.test(c)) t.add('anger/frustration');
-  if (/(work|job|boss|career)/.test(c)) t.add('work');
-  if (/(relationship|friend|family|partner)/.test(c)) t.add('relationships');
-  if (/(health|exercise|sleep)/.test(c)) t.add('health/wellness');
-  if (/(money|financial|budget)/.test(c)) t.add('finances');
-  if (/(grateful|thankful|appreciate)/.test(c)) t.add('gratitude');
-  if (/(goal|plan|future)/.test(c)) t.add('goals/planning');
-  if (/(learn|grow|improve)/.test(c)) t.add('growth/learning');
-  return Array.from(t);
-}
-
-function generateEnhancedAIPrompt({ userProfile, recentMoods, recentJournals, questionnaire, userContext, containsSensitive }) {
-  let prompt = `You are Luma, a compassionate AI therapist...`; // (same as your original, shortened for brevity here)
-  if (userProfile.first_name) prompt += `\nName: ${userProfile.first_name}\n`;
-  if (questionnaire.completed) {
-    if (questionnaire.main_goals?.length) prompt += `\nGoals: ${questionnaire.main_goals.join(', ')}`;
-    if (questionnaire.communication_style) prompt += `\nStyle: ${questionnaire.communication_style}`;
-  }
-  if (recentMoods?.length) {
-    const avg = recentMoods.reduce((s,e)=>s+e.mood,0)/recentMoods.length;
-    const trend = analyzeMoodTrend(recentMoods);
-    prompt += `\nAvg mood: ${avg.toFixed(1)}/10, trend: ${trend}`;
-  }
-  if (recentJournals?.length) {
-    for (const j of recentJournals) {
-      const th = extractJournalThemes(j.content);
-      if (th.length) prompt += `\nJournal themes: ${th.join(', ')}`;
-    }
-  }
-  if (containsSensitive) prompt += `\nSENSITIVE: use crisis-aware language and provide resources if appropriate.`;
-  return prompt;
-}
-
-function generateEnhancedFallbackResponse(message, userProfile, recentMoods, recentJournals) {
-  const name = userProfile.first_name ? `${userProfile.first_name}, ` : '';
-  const lm = (message || '').toLowerCase();
-  let moodNote = '';
-  if (recentMoods?.length) {
-    const avg = recentMoods.reduce((s,e)=>s+e.mood,0)/recentMoods.length;
-    if (avg < 5) moodNote = " I notice some lower moods lately.";
-    else if (avg > 7) moodNote = " Nice to see some higher moods recently.";
-  }
-  if (/(anxious|anxiety)/.test(lm)) return `${name}I hear you're feeling anxious.${moodNote} Try 4-7-8 breathing... What seems to be triggering it right now?`;
-  if (/(sad|depressed|down)/.test(lm)) return `${name}I'm sorry you're feeling low.${moodNote} Small actions can help... What's been on your mind lately?`;
-  if (/(stress|overwhelmed)/.test(lm)) return `${name}Feeling overwhelmed is tough.${moodNote} Let's break it down—what’s the biggest stressor right now?`;
-  if (/(sleep|tired|insomnia)/.test(lm)) return `${name}Sleep issues can ripple everywhere.${moodNote} How long has this been going on?`;
-  if (/(good|better|happy)/.test(lm)) return `${name}Love to hear the positives.${moodNote} What’s contributing to it?`;
-  return `${name}Thanks for sharing.${moodNote} I’m here to listen. Tell me more about what’s going on.`;
-}
-
-// Chat
+// ENHANCED CHAT ENDPOINT WITH PROPER LUMA AI PROMPT
 app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
-    const { message, chatHistory, sessionId, consentedToAI, userContext } = req.body || {};
-    if (!consentedToAI) return res.status(403).json({ success: false, error: 'AI processing consent required', message: 'AI processing consent required', requiresConsent: true });
+    const { message, chatHistory, sessionId, consentedToAI, userContext } = req.body;
+    
+    // Check AI processing consent
+    if (!consentedToAI) {
+      return res.status(403).json({ 
+        success: false,
+        error: 'AI processing consent required',
+        message: 'AI processing consent required',
+        requiresConsent: true 
+      });
+    }
 
     let currentSession = null;
+
     if (sessionId) {
-      const r = await pool.query('SELECT * FROM chat_sessions WHERE id=$1 AND user_id=$2', [sessionId, req.user.userId]);
-      if (r.rows.length) currentSession = r.rows[0];
+      const sessionResult = await pool.query(
+        'SELECT * FROM chat_sessions WHERE id = $1 AND user_id = $2',
+        [sessionId, req.user.userId]
+      );
+      
+      if (sessionResult.rows.length > 0) {
+        currentSession = sessionResult.rows[0];
+      }
     }
+    
     if (!currentSession) {
-      const r = await pool.query(
-        'INSERT INTO chat_sessions (user_id, start_time, last_activity, user_context) VALUES ($1,NOW(),NOW(),$2) RETURNING *',
+      const sessionResult = await pool.query(
+        'INSERT INTO chat_sessions (user_id, start_time, last_activity, user_context) VALUES ($1, NOW(), NOW(), $2) RETURNING *',
         [req.user.userId, JSON.stringify({ mood: null, recentJournalThemes: [], questionnaireCompleted: false })]
       );
-      currentSession = r.rows[0];
+      currentSession = sessionResult.rows[0];
     }
 
-    const sensitiveKeywords = ['suicide','self-harm','kill myself','medication','doctor','therapist'];
-    const containsSensitive = sensitiveKeywords.some(k => (message || '').toLowerCase().includes(k));
+    // Detect sensitive content
+    const sensitiveKeywords = ['suicide', 'self-harm', 'kill myself', 'medication', 'doctor', 'therapist'];
+    const containsSensitive = sensitiveKeywords.some(keyword => message.toLowerCase().includes(keyword));
 
-    await pool.query('INSERT INTO chat_messages (session_id, role, content, contains_sensitive_data, timestamp) VALUES ($1,$2,$3,$4,NOW())',
-      [currentSession.id, 'user', message, containsSensitive]);
+    // Add user message to session
+    await pool.query(
+      'INSERT INTO chat_messages (session_id, role, content, contains_sensitive_data, timestamp) VALUES ($1, $2, $3, $4, NOW())',
+      [currentSession.id, 'user', message, containsSensitive]
+    );
 
+    // Get comprehensive user data for AI context
     const [profileResult, moodResult, journalResult, questionnaireResult] = await Promise.all([
-      pool.query('SELECT first_name, pronouns FROM user_profiles WHERE user_id=$1', [req.user.userId]),
-      pool.query('SELECT mood, note, entry_date FROM mood_entries WHERE user_id=$1 ORDER BY entry_date DESC LIMIT 7', [req.user.userId]),
-      pool.query('SELECT content, prompt, entry_date FROM journal_entries WHERE user_id=$1 ORDER BY entry_date DESC LIMIT 3', [req.user.userId]),
-      pool.query('SELECT completed, main_goals, communication_style FROM questionnaire_responses WHERE user_id=$1', [req.user.userId])
+      pool.query('SELECT first_name, pronouns FROM user_profiles WHERE user_id = $1', [req.user.userId]),
+      pool.query('SELECT mood, note, entry_date FROM mood_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 7', [req.user.userId]),
+      pool.query('SELECT content, prompt, entry_date FROM journal_entries WHERE user_id = $1 ORDER BY entry_date DESC LIMIT 3', [req.user.userId]),
+      pool.query('SELECT completed, main_goals, communication_style FROM questionnaire_responses WHERE user_id = $1', [req.user.userId])
     ]);
 
     const userProfile = profileResult.rows[0] || {};
@@ -759,110 +1254,539 @@ app.post('/api/chat', authenticateToken, async (req, res) => {
     const recentJournals = journalResult.rows;
     const questionnaire = questionnaireResult.rows[0] || {};
 
-    const systemPrompt = generateEnhancedAIPrompt({ userProfile, recentMoods, recentJournals, questionnaire, userContext, containsSensitive });
-
-    // Get recent history (excluding the message we just added)
-    const recentMessages = await pool.query('SELECT role, content FROM chat_messages WHERE session_id=$1 ORDER BY timestamp DESC LIMIT 10', [currentSession.id]);
-    const messages = [{ role: 'system', content: systemPrompt }];
-    recentMessages.rows.reverse().slice(0, -1).forEach(m => {
-      if (m.role === 'user' || m.role === 'assistant') messages.push({ role: m.role, content: m.content });
+    // Generate enhanced AI prompt with user context
+    const systemPrompt = generateEnhancedAIPrompt({
+      userProfile,
+      recentMoods,
+      recentJournals,
+      questionnaire,
+      userContext,
+      containsSensitive
     });
-    messages.push({ role: 'user', content: message });
 
-    // Call OpenAI if configured (Node 18+ has global fetch)
+    // Get recent conversation history
+    const recentMessages = await pool.query(
+      'SELECT role, content FROM chat_messages WHERE session_id = $1 ORDER BY timestamp DESC LIMIT 10',
+      [currentSession.id]
+    );
+
+    // Prepare messages for OpenAI
+    const messages = [
+      {
+        role: 'system',
+        content: systemPrompt
+      }
+    ];
+
+    // Add recent conversation history (excluding the message we just added)
+    const historyMessages = recentMessages.rows.reverse().slice(0, -1);
+    historyMessages.forEach(msg => {
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        messages.push({
+          role: msg.role,
+          content: msg.content
+        });
+      }
+    });
+
+    // Add current message
+    messages.push({
+      role: 'user',
+      content: message
+    });
+
+    // Call OpenAI API if available
     if (process.env.OPENAI_API_KEY) {
       try {
-        const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'gpt-4', messages, temperature: 0.8, max_tokens: 400 })
+          headers: {
+            'Authorization': Bearer ${process.env.OPENAI_API_KEY},
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4',
+            messages: messages,
+            temperature: 0.8,
+            max_tokens: 400
+          }),
         });
-        const data = await resp.json();
-        const aiResponse = data?.choices?.[0]?.message?.content;
-        if (!aiResponse) throw new Error('No response from OpenAI');
-
-        await pool.query('INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1,$2,$3,NOW())',
-          [currentSession.id, 'assistant', aiResponse]);
-        return res.json({ success: true, response: aiResponse, sessionId: currentSession.id });
-      } catch (err) {
-        console.error('OpenAI error:', err);
+        
+        const data = await response.json();
+        
+        if (data.choices && data.choices[0]) {
+          const aiResponse = data.choices[0].message.content;
+          
+          // Add AI response to session
+          await pool.query(
+            'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+            [currentSession.id, 'assistant', aiResponse]
+          );
+          
+          res.json({ 
+            success: true,
+            response: aiResponse,
+            sessionId: currentSession.id
+          });
+        } else {
+          throw new Error('No response from OpenAI');
+        }
+      } catch (openaiError) {
+        console.error('OpenAI API error:', openaiError);
+        // Fallback to enhanced response
+        const fallbackResponse = generateEnhancedFallbackResponse(message, userProfile, recentMoods, recentJournals);
+        
+        await pool.query(
+          'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+          [currentSession.id, 'assistant', fallbackResponse]
+        );
+        
+        res.json({ 
+          success: true,
+          response: fallbackResponse,
+          sessionId: currentSession.id
+        });
       }
+    } else {
+      // No OpenAI API key - use enhanced fallback
+      const fallbackResponse = generateEnhancedFallbackResponse(message, userProfile, recentMoods, recentJournals);
+      
+      await pool.query(
+        'INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1, $2, $3, NOW())',
+        [currentSession.id, 'assistant', fallbackResponse]
+      );
+      
+      res.json({ 
+        success: true,
+        response: fallbackResponse,
+        sessionId: currentSession.id
+      });
+    }
+    
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Server error',
+      message: 'Server error'
+    });
+  }
+});
+
+// AI PROMPT GENERATION FUNCTIONS
+function generateEnhancedAIPrompt({ userProfile, recentMoods, recentJournals, questionnaire, userContext, containsSensitive }) {
+  let prompt = You are Luma, a compassionate AI therapist and wellness companion focused on mental health and emotional wellbeing. You provide thoughtful, empathetic responses that help users process their emotions and develop healthy coping strategies.
+
+CORE EXPERTISE:
+- Evidence-based therapy techniques (CBT, DBT, mindfulness, ACT)
+- Mental health support and emotional processing
+- Stress management and anxiety reduction techniques
+- Healthy coping strategies and self-care practices
+- Building emotional resilience and self-awareness
+- Practical advice for daily mental wellness
+- Crisis recognition and professional referral guidance
+
+THERAPEUTIC APPROACH:
+- Provide warm, non-judgmental support with genuine empathy
+- Use evidence-based therapeutic techniques appropriately
+- Offer practical, actionable advice tailored to the individual
+- Help users identify patterns in thoughts, emotions, and behaviors
+- Encourage healthy habits and meaningful self-reflection
+- Validate feelings while gently challenging unhelpful thought patterns
+- Always emphasize that you're a supportive tool, not a replacement for professional therapy
+
+COMMUNICATION STYLE:
+- Be conversational and supportive, not clinical or robotic
+- Use the user's name when you know it to create connection
+- Match their communication style (formal vs casual) while remaining professional
+- Ask thoughtful follow-up questions to deepen understanding
+- Provide specific, actionable suggestions rather than generic advice
+- Use therapeutic techniques naturally within conversation
+- Show genuine interest in their progress and wellbeing
+
+;
+
+  // Add personalization based on user data
+  if (userProfile.first_name) {
+    prompt += USER INFORMATION:
+- Name: ${userProfile.first_name} (always use their name to create connection)
+;
+    if (userProfile.pronouns) {
+      prompt += - Pronouns: ${userProfile.pronouns} (use these when referring to them)
+;
+    }
+  }
+
+  // Add questionnaire insights
+  if (questionnaire.completed) {
+    prompt += 
+QUESTIONNAIRE INSIGHTS:;
+    
+    if (questionnaire.main_goals && questionnaire.main_goals.length > 0) {
+      prompt += 
+- Their main wellness goals: ${questionnaire.main_goals.join(', ')};
+    }
+    
+    if (questionnaire.communication_style) {
+      prompt += 
+- Preferred communication style: ${questionnaire.communication_style};
+    }
+  }
+
+  // Add mood pattern analysis
+  if (recentMoods && recentMoods.length > 0) {
+    const avgMood = recentMoods.reduce((sum, entry) => sum + entry.mood, 0) / recentMoods.length;
+    const moodTrend = analyzeMoodTrend(recentMoods);
+    
+    prompt += 
+RECENT MOOD PATTERNS (Last 7 days):
+- Average mood: ${avgMood.toFixed(1)}/10
+- Trend: ${moodTrend}
+- Recent entries: ;
+    
+    recentMoods.slice(0, 3).forEach(mood => {
+      const daysAgo = Math.floor((Date.now() - new Date(mood.entry_date).getTime()) / (1000 * 60 * 60 * 24));
+      const timeRef = daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : ${daysAgo} days ago;
+      prompt += ${mood.mood}/10 (${timeRef});
+      if (mood.note) prompt +=  - "${mood.note}";
+      prompt += '; ';
+    });
+  }
+
+  // Add journal theme analysis
+  if (recentJournals && recentJournals.length > 0) {
+    prompt += 
+RECENT JOURNAL THEMES:;
+    
+    recentJournals.forEach(journal => {
+      const daysAgo = Math.floor((Date.now() - new Date(journal.entry_date).getTime()) / (1000 * 60 * 60 * 24));
+      const timeRef = daysAgo === 0 ? 'today' : daysAgo === 1 ? 'yesterday' : ${daysAgo} days ago;
+      
+      if (journal.prompt) {
+        prompt += 
+- ${timeRef}: Reflected on "${journal.prompt}";
+      }
+      
+      // Extract themes from journal content
+      const themes = extractJournalThemes(journal.content);
+      if (themes.length > 0) {
+        prompt += 
+  Themes: ${themes.join(', ')};
+      }
+    });
+  }
+
+  // Add sensitivity guidance
+  if (containsSensitive) {
+    prompt += 
+⚠️ SENSITIVE CONTENT DETECTED: The user's message contains potentially sensitive topics. Please:
+- Respond with extra care and empathy
+- Consider crisis intervention protocols if appropriate
+- Encourage professional help if the situation warrants it
+- Provide crisis resources if someone expresses suicidal ideation
+- Stay calm and supportive while taking the situation seriously;
+  }
+
+  // Add contextual instructions
+  prompt += 
+RESPONSE GUIDELINES:
+- Reference their personal data naturally in conversation (don't just list facts)
+- Ask follow-up questions about patterns you notice in their mood/journal data
+- Provide personalized advice based on their specific situation and history
+- Celebrate their progress and validate their challenges
+- Use their name ${userProfile.first_name ? (${userProfile.first_name}) : ''} to create connection
+- Keep responses conversational, helpful, and under 300 words unless they ask for detailed guidance
+- If they're struggling, offer specific coping techniques based on their preferences and history
+- Always end with a thoughtful question or invitation to share more when appropriate
+
+Remember: You're having a conversation with a real person who has trusted you with their mental health journey. Be genuine, caring, and helpful while maintaining appropriate boundaries.;
+
+  return prompt;
+}
+
+function analyzeMoodTrend(moods) {
+  if (moods.length < 2) return 'insufficient data';
+  
+  const recent = moods.slice(0, 3).map(m => m.mood);
+  const older = moods.slice(3, 6).map(m => m.mood);
+  
+  if (older.length === 0) return 'stable';
+  
+  const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const olderAvg = older.reduce((a, b) => a + b, 0) / older.length;
+  
+  const difference = recentAvg - olderAvg;
+  
+  if (difference > 1) return 'improving';
+  if (difference < -1) return 'declining';
+  return 'stable';
+}
+
+function extractJournalThemes(content) {
+  const themes = [];
+  const lowerContent = content.toLowerCase();
+  
+  // Emotional themes
+  if (lowerContent.includes('stress') || lowerContent.includes('anxious') || lowerContent.includes('worried')) {
+    themes.push('stress/anxiety');
+  }
+  if (lowerContent.includes('sad') || lowerContent.includes('depressed') || lowerContent.includes('down')) {
+    themes.push('sadness');
+  }
+  if (lowerContent.includes('happy') || lowerContent.includes('joy') || lowerContent.includes('excited')) {
+    themes.push('happiness');
+  }
+  if (lowerContent.includes('angry') || lowerContent.includes('frustrated') || lowerContent.includes('irritated')) {
+    themes.push('anger/frustration');
+  }
+  
+  // Life area themes
+  if (lowerContent.includes('work') || lowerContent.includes('job') || lowerContent.includes('boss') || lowerContent.includes('career')) {
+    themes.push('work');
+  }
+  if (lowerContent.includes('relationship') || lowerContent.includes('friend') || lowerContent.includes('family') || lowerContent.includes('partner')) {
+    themes.push('relationships');
+  }
+  if (lowerContent.includes('health') || lowerContent.includes('exercise') || lowerContent.includes('sleep')) {
+    themes.push('health/wellness');
+  }
+  if (lowerContent.includes('money') || lowerContent.includes('financial') || lowerContent.includes('budget')) {
+    themes.push('finances');
+  }
+  
+  // Positive themes
+  if (lowerContent.includes('grateful') || lowerContent.includes('thankful') || lowerContent.includes('appreciate')) {
+    themes.push('gratitude');
+  }
+  if (lowerContent.includes('goal') || lowerContent.includes('plan') || lowerContent.includes('future')) {
+    themes.push('goals/planning');
+  }
+  if (lowerContent.includes('learn') || lowerContent.includes('grow') || lowerContent.includes('improve')) {
+    themes.push('growth/learning');
+  }
+  
+  return [...new Set(themes)]; // Remove duplicates
+}
+
+// Enhanced fallback response generator with user context
+function generateEnhancedFallbackResponse(message, userProfile, recentMoods, recentJournals) {
+  const name = userProfile.first_name || '';
+  const greeting = name ? ${name},  : '';
+  const lowerMessage = message.toLowerCase();
+  
+  // Analyze recent data for context
+  let moodContext = '';
+  if (recentMoods && recentMoods.length > 0) {
+    const avgMood = recentMoods.reduce((sum, entry) => sum + entry.mood, 0) / recentMoods.length;
+    if (avgMood < 5) {
+      moodContext = " I notice you've been tracking some lower moods recently, and I want you to know that's completely valid.";
+    } else if (avgMood > 7) {
+      moodContext = " I'm glad to see you've been experiencing some positive moods lately.";
+    }
+  }
+  
+  // Generate contextual responses
+  if (lowerMessage.includes('anxious') || lowerMessage.includes('anxiety')) {
+    return ${greeting}I hear that you're feeling anxious${moodContext} That's completely understandable - anxiety is something many people experience. One technique that can help in the moment is the 4-7-8 breathing method: breathe in for 4 counts, hold for 7, and exhale for 8. This activates your body's relaxation response. 
+
+Based on your recent patterns, it might also help to identify specific triggers. Can you tell me more about what's making you feel anxious right now?;
+  }
+  
+  if (lowerMessage.includes('sad') || lowerMessage.includes('depressed') || lowerMessage.includes('down')) {
+    return ${greeting}I'm sorry you're feeling this way${moodContext} Your feelings are valid, and it's important that you're reaching out. Sometimes when we're feeling low, small actions can help - even something as simple as stepping outside for a few minutes or reaching out to someone you care about.
+
+What's been on your mind lately that might be contributing to these feelings? Sometimes talking through our thoughts can provide clarity.;
+  }
+  
+  if (lowerMessage.includes('stress') || lowerMessage.includes('overwhelmed')) {
+    return ${greeting}Feeling stressed or overwhelmed is really challenging${moodContext} When we're in that state, it can help to break things down into smaller, manageable pieces. One approach is to identify what you can control versus what you can't - focusing your energy on the things within your influence.
+
+What's the biggest source of stress for you right now? Let's see if we can work through it together.;
+  }
+  
+  if (lowerMessage.includes('sleep') || lowerMessage.includes('tired') || lowerMessage.includes('insomnia')) {
+    return ${greeting}Sleep issues can really impact how we feel overall${moodContext} Good sleep hygiene can make a big difference - things like keeping a consistent bedtime, avoiding screens before bed, and creating a calming bedtime routine.
+
+How long have you been having trouble with sleep? Are there any patterns you've noticed that might be affecting your rest?;
+  }
+  
+  // Check for positive messages
+  if (lowerMessage.includes('good') || lowerMessage.includes('better') || lowerMessage.includes('happy')) {
+    return ${greeting}It's wonderful to hear that you're feeling good${moodContext} Celebrating these positive moments is important for our mental health. What's contributing to this positive feeling? 
+
+Sometimes it helps to reflect on what's working well so we can recognize and build on these patterns.;
+  }
+  
+  // General supportive response with personalization
+  return ${greeting}Thank you for sharing that with me${moodContext} I'm here to listen and support you. It sounds like you have something important on your mind, and I want you to know that your feelings and experiences matter.
+
+Sometimes just talking through our thoughts and feelings can provide clarity and relief. Can you tell me more about what you're experiencing right now? I'm here to help you work through whatever you're facing.;
+}
+
+// Database connection test endpoint
+app.get('/api/debug/db-test', async (req, res) => {
+  try {
+    console.log('🔍 Testing database connection...');
+    
+    // Test basic connection
+    const client = await pool.connect();
+    console.log('✅ Database connection successful');
+    
+    // Test users table
+    const usersTest = await client.query('SELECT COUNT(*) as count FROM users');
+    console.log('✅ Users table accessible, count:', usersTest.rows[0].count);
+    
+    // Test user_profiles table
+    const profilesTest = await client.query('SELECT COUNT(*) as count FROM user_profiles');
+    console.log('✅ User profiles table accessible, count:', profilesTest.rows[0].count);
+    
+    // Test questionnaire_responses table
+    const questionnaireTest = await client.query('SELECT COUNT(*) as count FROM questionnaire_responses');
+    console.log('✅ Questionnaire responses table accessible, count:', questionnaireTest.rows[0].count);
+    
+    client.release();
+    
+    res.json({
+      success: true,
+      message: 'Database connection and tables working',
+      data: {
+        users: parseInt(usersTest.rows[0].count),
+        profiles: parseInt(profilesTest.rows[0].count),
+        questionnaires: parseInt(questionnaireTest.rows[0].count)
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Database test error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Database test failed',
+      details: {
+        message: error.message,
+        code: error.code,
+        detail: error.detail
+      }
+    });
+  }
+});
+
+// DEBUG ENDPOINT: Check users (development only)
+app.get('/api/debug/users', async (req, res) => {
+  try {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(404).json({ error: 'Not found' });
     }
 
-    // Fallback
-    const fallback = generateEnhancedFallbackResponse(message, userProfile, recentMoods, recentJournals);
-    await pool.query('INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ($1,$2,$3,NOW())',
-      [currentSession.id, 'assistant', fallback]);
-    res.json({ success: true, response: fallback, sessionId: currentSession.id });
-
-  } catch (e) {
-    console.error('Chat error:', e);
-    res.status(500).json({ success: false, error: 'Server error', message: 'Server error' });
+    const users = await pool.query('SELECT id, username, email, created_at FROM users ORDER BY created_at DESC LIMIT 10');
+    
+    res.json({
+      success: true,
+      count: users.rows.length,
+      users: users.rows
+    });
+  } catch (error) {
+    console.error('Debug users error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch users',
+      details: error.message 
+    });
   }
 });
 
-// Debug, health & root
-app.get('/api/debug/db-test', async (_req, res) => {
-  try {
-    const client = await pool.connect();
-    const users = await client.query('SELECT COUNT(*) as count FROM users');
-    const profiles = await client.query('SELECT COUNT(*) as count FROM user_profiles');
-    const questionnaires = await client.query('SELECT COUNT(*) as count FROM questionnaire_responses');
-    client.release();
-    res.json({ success: true, message: 'Database connection and tables working', data: {
-      users: parseInt(users.rows[0].count), profiles: parseInt(profiles.rows[0].count), questionnaires: parseInt(questionnaires.rows[0].count)
-    }});
-  } catch (e) {
-    res.status(500).json({ success: false, error: 'Database test failed', details: { message: e.message, code: e.code, detail: e.detail } });
-  }
-});
-
-app.get('/api/debug/users', async (_req, res) => {
-  if (isProd) return res.status(404).json({ error: 'Not found' });
-  const users = await pool.query('SELECT id, username, email, created_at FROM users ORDER BY created_at DESC LIMIT 10');
-  res.json({ success: true, count: users.rows.length, users: users.rows });
-});
-
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'healthy',
+// HEALTH CHECK
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '6.4.0 (security hardening)',
+    version: '6.3.0 - Added Resend Email Integration',
     database: 'PostgreSQL',
     openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
-    features: { passwordReset: 'Available', aiPrompt: 'Enhanced' },
+    features: {
+      passwordReset: 'Available',
+      profileFixes: 'Applied',
+      dataStructure: 'Fixed',
+      arrayHandling: 'Fixed',
+      aiPrompt: 'Enhanced'
+    },
     success: true
   });
 });
 
-app.get('/', (_req, res) => {
+// Basic route for root
+app.get('/', (req, res) => {
   res.json({
     message: 'Luma Backend API',
-    version: '6.4.0',
+    version: '6.3.0',
     status: 'running',
-    endpoints: { health: '/health', auth: '/api/auth/*', profile: '/api/profile', mood: '/api/mood', journal: '/api/journal', chat: '/api/chat' }
+    endpoints: {
+      health: '/health',
+      auth: '/api/auth/*',
+      profile: '/api/profile',
+      mood: '/api/mood',
+      journal: '/api/journal',
+      chat: '/api/chat'
+    }
   });
 });
 
-// 404 + error handler
-app.use('*', (_req, res) => res.status(404).json({ success: false, error: 'Route not found', message: 'The requested endpoint does not exist' }));
-app.use((error, _req, res, _next) => {
-  console.error('Unhandled error:', error);
-  res.status(500).json({ success: false, error: 'Internal server error', message: 'An unexpected error occurred' });
+// CATCH ALL - Return 404 for unknown routes
+app.use('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Route not found',
+    message: 'The requested endpoint does not exist'
+  });
 });
 
-// Start
-(async () => {
+// ERROR HANDLING MIDDLEWARE
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+  res.status(500).json({
+    success: false,
+    error: 'Internal server error',
+    message: 'An unexpected error occurred'
+  });
+});
+
+// Start server
+const startServer = async () => {
   try {
-    console.log('🚀 Starting Luma Backend…');
+    console.log('🚀 Starting Luma Backend Server...');
+    
+    // Test database connection
+    const client = await pool.connect();
+    console.log('✅ Database connection successful');
+    client.release();
+    
+    // Initialize database
     await initializeDatabase();
+    console.log('✅ Database initialization complete');
+    
+    // Start the server
     app.listen(PORT, () => {
-      console.log(`✅ Luma backend running on port ${PORT}`);
-      console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
-      console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI' : 'Fallback'}`);
+      console.log(✅ Luma backend running on port ${PORT});
+      console.log(🌐 Server URL: https://luma-backend-nfdc.onrender.com);
+      console.log(🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI GPT-4' : 'Fallback responses'});
+      console.log(🔥 SERVER IS READY TO HANDLE REQUESTS);
+      console.log(\n🎉 FEATURES INCLUDED:);
+      console.log(   ✅ FIXED: PostgreSQL array handling for registration);
+      console.log(   ✅ Enhanced transaction management with proper rollback);
+      console.log(   ✅ Improved error handling with specific PostgreSQL error codes);
+      console.log(   ✅ Fixed database schema initialization with proper data types);
+      console.log(   ✅ Added Resend email integration for password resets);
+      console.log(   ✅ Enhanced AI therapist prompt with evidence-based techniques);
+      console.log(   ✅ Complete password reset functionality with secure tokens);
+      console.log(   ✅ Intelligent fallback responses when OpenAI is unavailable);
+      console.log(   ✅ Personalized responses using user's name and context);
+      console.log(   ✅ Mood trend analysis and journal theme extraction);
+      console.log(   ✅ PIPEDA-compliant privacy features);
     });
-  } catch (e) {
-    console.error('❌ Failed to start server:', e);
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
     process.exit(1);
   }
-})();
+};
+
+// Start the server
+startServer();
