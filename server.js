@@ -930,15 +930,17 @@ app.get('/api/gamify/progress', authenticateToken, async (req, res) => {
 });
 
 /* =========================
-   PRIVACY ROUTES
+   PRIVACY ROUTES - FIXED
    ========================= */
-// Delete all data but keep the account
+// FIXED: Delete all data but keep the account and questionnaire completion status
 app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
   const userId = req.user.userId;
   const client = await pool.connect();
   try {
+    console.log(`🗑️ Starting data deletion for user: ${userId}`);
     await client.query('BEGIN');
 
+    // Delete chat data
     const chatMsgDelete = await client.query(
       `DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id=$1)`,
       [userId]
@@ -947,6 +949,8 @@ app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
       `DELETE FROM chat_sessions WHERE user_id=$1`,
       [userId]
     );
+    
+    // Delete mood and journal entries
     const moodDelete = await client.query(
       `DELETE FROM mood_entries WHERE user_id=$1`,
       [userId]
@@ -955,6 +959,8 @@ app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
       `DELETE FROM journal_entries WHERE user_id=$1`,
       [userId]
     );
+    
+    // Delete badges and gamification progress
     const badgesDelete = await client.query(
       `DELETE FROM user_badges WHERE user_id=$1`,
       [userId]
@@ -963,22 +969,45 @@ app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
       `DELETE FROM gamification_progress WHERE user_id=$1`,
       [userId]
     );
+
+    // FIXED: Don't reset questionnaire completion status
+    // Only clear the personal data, but keep completed=true so user doesn't go back to onboarding
     const questionnaireReset = await client.query(
       `UPDATE questionnaire_responses
-         SET completed=false,
-             first_name='',
+         SET first_name='',
              pronouns='',
              main_goals=ARRAY[]::TEXT[],
              communication_style='',
              data_purpose='app_personalization',
              consent_given=false,
-             completed_at=NULL,
+             updated_at=NOW()
+       WHERE user_id=$1`,
+      [userId]
+    );
+
+    // FIXED: Also clear profile data but don't delete the profile record
+    const profileReset = await client.query(
+      `UPDATE user_profiles
+         SET first_name='',
+             pronouns='',
              updated_at=NOW()
        WHERE user_id=$1`,
       [userId]
     );
 
     await client.query('COMMIT');
+    
+    console.log(`✅ Data deletion completed for user: ${userId}`);
+    console.log(`📊 Deletion summary:
+      - Chat messages: ${chatMsgDelete.rowCount}
+      - Chat sessions: ${chatSessionDelete.rowCount}
+      - Mood entries: ${moodDelete.rowCount}
+      - Journal entries: ${journalDelete.rowCount}
+      - Badges: ${badgesDelete.rowCount}
+      - Gamification rows: ${gamifyDelete.rowCount}
+      - Questionnaire updated: ${questionnaireReset.rowCount}
+      - Profile updated: ${profileReset.rowCount}`);
+
     res.json({
       success: true,
       message: 'All personal data deleted for this account (account retained).',
@@ -989,7 +1018,8 @@ app.delete('/api/privacy/delete-all', authenticateToken, async (req, res) => {
         journals: journalDelete.rowCount,
         badges: badgesDelete.rowCount,
         gamificationRows: gamifyDelete.rowCount,
-        questionnaireRowsUpdated: questionnaireReset.rowCount
+        questionnaireRowsUpdated: questionnaireReset.rowCount,
+        profileRowsUpdated: profileReset.rowCount
       }
     });
   } catch (e) {
@@ -1004,9 +1034,11 @@ app.delete('/api/privacy/delete-account', authenticateToken, async (req, res) =>
   const userId = req.user.userId;
   const client = await pool.connect();
   try {
+    console.log(`🗑️ Starting full account deletion for user: ${userId}`);
     await client.query('BEGIN');
     await client.query('DELETE FROM users WHERE id=$1', [userId]);
     await client.query('COMMIT');
+    console.log(`✅ Account fully deleted for user: ${userId}`);
     res.json({ success: true, message: 'Account and all data permanently deleted.' });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -1053,14 +1085,14 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    version: '6.6.0 - OpenAI Chat + Privacy Delete',
+    version: '6.7.0 - Fixed Privacy Delete',
     database: 'PostgreSQL',
     openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
     features: {
       passwordReset: 'Available',
       profileFixes: 'Applied',
       gamification: 'XP/Streaks/Badges',
-      deleteAllData: 'Available',
+      deleteAllData: 'Fixed - Preserves onboarding status',
       deleteAccount: 'Available',
       therapistAI: process.env.OPENAI_API_KEY ? 'On' : 'Off'
     },
@@ -1070,7 +1102,7 @@ app.get('/health', (_req, res) => {
 app.get('/', (_req, res) => {
   res.json({
     message: 'Luma Backend API',
-    version: '6.6.0',
+    version: '6.7.0 - Fixed Privacy Delete',
     status: 'running',
     endpoints: {
       health: '/health',
@@ -1107,7 +1139,7 @@ const startServer = async () => {
       console.log(`✅ Luma backend running on port ${PORT}`);
       console.log(`🌐 Server URL: https://luma-backend-nfdc.onrender.com`);
       console.log(`🤖 AI Mode: ${process.env.OPENAI_API_KEY ? 'OpenAI' : 'Fallback responses'}`);
-      console.log('🧹 Privacy deletes: delete-all + delete-account enabled');
+      console.log('🧹 Privacy deletes: Fixed - preserves onboarding status');
     });
   } catch (e) {
     console.error('❌ Failed to start server:', e);
