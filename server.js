@@ -249,6 +249,51 @@ async function initializeDatabase() {
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_badges_user_id ON user_badges(user_id);`);
 
+    // --- NEW: badges metadata + custom streaks ---
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS badges_metadata (
+        badge_key VARCHAR(50) PRIMARY KEY,
+        title VARCHAR(100) NOT NULL,
+        description TEXT,
+        icon_emoji VARCHAR(10),
+        xp_reward INTEGER DEFAULT 0
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_streaks (
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        streak_type VARCHAR(50) NOT NULL,
+        count INTEGER NOT NULL DEFAULT 1,
+        last_updated DATE NOT NULL DEFAULT CURRENT_DATE,
+        PRIMARY KEY (user_id, streak_type)
+      )
+    `);
+
+    // Seed standard badges (idempotent)
+    await pool.query(`
+      INSERT INTO badges_metadata (badge_key, title, description, icon_emoji, xp_reward)
+      VALUES
+        ('first_mood', 'First Step', 'Logged your first mood', '👣', 10),
+        ('first_journal', 'Writer', 'Created first journal entry', '✍️', 15),
+        ('first_chat', 'Conversation Starter', 'Sent first chat message', '💬', 5),
+        ('onboard_complete', 'All Set', 'Completed onboarding', '✅', 20),
+        ('streak_3', '3-Day Streak', '3 days of continuous activity', '🔥', 10),
+        ('streak_7', '7-Day Streak', '7 days of continuous activity', '🌟', 25),
+        ('streak_30', 'Monthly', '30 days of continuous activity', '🏆', 100),
+        ('xp_100', 'Century', 'Earned 100 XP', '💯', 0),
+        ('xp_500', 'Half Grand', 'Earned 500 XP', '✨', 0),
+        ('xp_1000', 'Grand Master', 'Earned 1000 XP', '🎖️', 0),
+        ('early_bird', 'Early Bird', 'Logged mood before 8 AM for 5 days', '🌅', 15),
+        ('night_owl', 'Night Owl', 'Logged mood after 10 PM for 5 days', '🌙', 15),
+        ('weekend_warrior', 'Weekend Warrior', 'Completed all weekend activities', '🏆', 20),
+        ('balanced', 'Balanced', 'Consistent mid-range moods for 7 days', '⚖️', 25),
+        ('overcomer', 'Overcomer', 'Improved mood by +3 points in 1 day', '🎢', 30),
+        ('chatterbox', 'Chatterbox', 'Sent 100+ chat messages', '💬', 50),
+        ('memoirist', 'Memoirist', 'Wrote 30+ journal entries', '📖', 50)
+      ON CONFLICT (badge_key) DO NOTHING;
+    `);
+
     console.log('✅ Database tables initialized successfully');
   } catch (error) {
     console.error('❌ Error initializing database:', error);
@@ -325,23 +370,83 @@ const awardBadgeIfNeeded = (client, userId, badgeKey) =>
      VALUES ($1,$2) ON CONFLICT (user_id, badge_key) DO NOTHING`,
     [userId, badgeKey]
   );
+
+// --- NEW HELPERS ---
+
+async function updateStreak(client, userId, streakType, date) {
+  await client.query(
+    `INSERT INTO user_streaks (user_id, streak_type, count, last_updated)
+     VALUES ($1, $2, 1, $3)
+     ON CONFLICT (user_id, streak_type)
+     DO UPDATE SET 
+       count = CASE WHEN user_streaks.last_updated = $3::date - interval '1 day' 
+                    THEN user_streaks.count + 1
+                    ELSE 1 END,
+       last_updated = $3`,
+    [userId, streakType, date]
+  );
+}
+
+async function getStreak(client, userId, streakType) {
+  const res = await client.query(
+    `SELECT count FROM user_streaks WHERE user_id = $1 AND streak_type = $2`,
+    [userId, streakType]
+  );
+  return res.rows[0]?.count || 0;
+}
+
+async function getJournalCount(client, userId) {
+  const res = await client.query(
+    `SELECT COUNT(*) FROM journal_entries WHERE user_id = $1`,
+    [userId]
+  );
+  return parseInt(res.rows[0].count, 10);
+}
+
+async function getChatCount(client, userId) {
+  const res = await client.query(
+    `SELECT COUNT(*) FROM chat_messages 
+     WHERE role='user' 
+       AND session_id IN (SELECT id FROM chat_sessions WHERE user_id=$1)`,
+    [userId]
+  );
+  return parseInt(res.rows[0].count, 10);
+}
+
+async function getYesterdayMood(client, userId) {
+  // Yesterday in UTC
+  const yesterday = new Date();
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+  const yStart = new Date(Date.UTC(yesterday.getUTCFullYear(), yesterday.getUTCMonth(), yesterday.getUTCDate(), 0, 0, 0));
+  const yEnd   = new Date(Date.UTC(yesterday.getUTCFullYear(), yesterday.getUTCMonth(), yesterday.getUTCDate(), 23, 59, 59));
+
+  const res = await client.query(
+    `SELECT mood FROM mood_entries
+     WHERE user_id=$1 AND entry_date BETWEEN $2 AND $3
+     ORDER BY entry_date DESC
+     LIMIT 1`,
+    [userId, yStart.toISOString(), yEnd.toISOString()]
+  );
+  return res.rows[0]?.mood ?? null;
+}
+
 function diffDaysUTC(fromDateString, toDateString) {
   if (!fromDateString) return null;
   const from = new Date(fromDateString + 'T00:00:00.000Z');
   const to = new Date(toDateString + 'T00:00:00.000Z');
   return Math.floor((to - from) / (1000 * 60 * 60 * 24));
 }
-async function trackAction(userId, actionType) {
+
+async function trackAction(userId, actionType, opts = {}) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     let progress = await ensureProgress(client, userId);
-
     const xpGain = XP_VALUES[actionType] || 0;
-    let newXP = progress.xp + xpGain;
-
     const today = todayUTCDateString();
+
+    // streak calc vs last activity
     const diff = diffDaysUTC(progress.last_activity_date, today);
     let newCurrentStreak;
     if (progress.last_activity_date == null) newCurrentStreak = 1;
@@ -349,6 +454,7 @@ async function trackAction(userId, actionType) {
     else if (diff === 1) newCurrentStreak = (progress.current_streak || 0) + 1;
     else newCurrentStreak = 1;
 
+    const newXP = progress.xp + xpGain;
     const newLongest = Math.max(progress.longest_streak || 0, newCurrentStreak);
     const newLevel = levelFromXP(newXP);
 
@@ -361,17 +467,85 @@ async function trackAction(userId, actionType) {
     progress = updated.rows[0];
 
     const newly = [];
-    if (actionType === 'mood_entry')  { await awardBadgeIfNeeded(client, userId, 'first_mood'); newly.push('first_mood'); }
-    if (actionType === 'journal_entry'){ await awardBadgeIfNeeded(client, userId, 'first_journal'); newly.push('first_journal'); }
-    if (actionType === 'chat_message') { await awardBadgeIfNeeded(client, userId, 'first_chat'); newly.push('first_chat'); }
+
+    // existing first-action badges
+    if (actionType === 'mood_entry')       { await awardBadgeIfNeeded(client, userId, 'first_mood'); newly.push('first_mood'); }
+    if (actionType === 'journal_entry')    { await awardBadgeIfNeeded(client, userId, 'first_journal'); newly.push('first_journal'); }
+    if (actionType === 'chat_message')     { await awardBadgeIfNeeded(client, userId, 'first_chat'); newly.push('first_chat'); }
     if (actionType === 'questionnaire_complete') { await awardBadgeIfNeeded(client, userId, 'onboard_complete'); newly.push('onboard_complete'); }
 
+    // streak badges (global streak)
     for (const s of [3, 7, 30]) {
-      if (progress.current_streak === s) { await awardBadgeIfNeeded(client, userId, `streak_${s}`); newly.push(`streak_${s}`); }
+      if (progress.current_streak === s) {
+        await awardBadgeIfNeeded(client, userId, `streak_${s}`);
+        newly.push(`streak_${s}`);
+      }
     }
+
+    // xp milestone badges
     for (const x of [100, 500, 1000]) {
       const justReached = progress.xp - xpGain < x && progress.xp >= x;
-      if (justReached) { await awardBadgeIfNeeded(client, userId, `xp_${x}`); newly.push(`xp_${x}`); }
+      if (justReached) {
+        await awardBadgeIfNeeded(client, userId, `xp_${x}`);
+        newly.push(`xp_${x}`);
+      }
+    }
+
+    // --- NEW BADGE LOGIC ---
+
+    // Time-of-day streaks for mood entries (UTC hours)
+    if (actionType === 'mood_entry') {
+      const mood = typeof opts.mood === 'number' ? opts.mood : null;
+      const now = new Date();
+      const hours = now.getUTCHours();
+
+      const timeBasedStreakType = hours < 8 ? 'early_bird' : (hours >= 22 ? 'night_owl' : null);
+      if (timeBasedStreakType) {
+        await updateStreak(client, userId, timeBasedStreakType, today);
+        const cnt = await getStreak(client, userId, timeBasedStreakType);
+        if (cnt >= 5) {
+          await awardBadgeIfNeeded(client, userId, timeBasedStreakType);
+          newly.push(timeBasedStreakType);
+        }
+      }
+
+      // Overcomer (improved mood by +3 vs yesterday)
+      if (mood != null) {
+        const yMood = await getYesterdayMood(client, userId);
+        if (yMood != null && mood - yMood >= 3) {
+          await awardBadgeIfNeeded(client, userId, 'overcomer');
+          newly.push('overcomer');
+        }
+      }
+    }
+
+    // Journalist: 30+ entries
+    if (actionType === 'journal_entry') {
+      const journalCount = await getJournalCount(client, userId);
+      if (journalCount >= 30) {
+        await awardBadgeIfNeeded(client, userId, 'memoirist');
+        newly.push('memoirist');
+      }
+    }
+
+    // Chatterbox: 100+ user chat messages
+    if (actionType === 'chat_message') {
+      const chatCount = await getChatCount(client, userId);
+      if (chatCount >= 100) {
+        await awardBadgeIfNeeded(client, userId, 'chatterbox');
+        newly.push('chatterbox');
+      }
+    }
+
+    // Weekend Warrior: Fri/Sat/Sun activity any action
+    const dow = new Date().getUTCDay(); // 0=Sun ... 6=Sat
+    if ([5, 6, 0].includes(dow)) {
+      await updateStreak(client, userId, 'weekend_activity', today);
+      const weekendCnt = await getStreak(client, userId, 'weekend_activity');
+      if (weekendCnt >= 3) {
+        await awardBadgeIfNeeded(client, userId, 'weekend_warrior');
+        newly.push('weekend_warrior');
+      }
     }
 
     await client.query('COMMIT');
@@ -713,7 +887,7 @@ app.post('/api/mood', authenticateToken, async (req, res) => {
       [req.user.userId, parseInt(mood, 10), note || null, date, dataPurpose]
     );
 
-    const gamify = await trackAction(req.user.userId, 'mood_entry');
+    const gamify = await trackAction(req.user.userId, 'mood_entry', { mood: parseInt(mood, 10) });
     res.json({ success: true, message: 'Mood entry saved successfully', entry: r.rows[0], gamification: gamify });
   } catch (e) {
     console.error('Mood save error:', e);
@@ -1085,13 +1259,13 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    version: '6.7.0 - Fixed Privacy Delete',
+    version: '6.8.0 - Badges & Custom Streaks',
     database: 'PostgreSQL',
     openai: process.env.OPENAI_API_KEY ? 'Available' : 'Fallback mode',
     features: {
       passwordReset: 'Available',
       profileFixes: 'Applied',
-      gamification: 'XP/Streaks/Badges',
+      gamification: 'XP/Streaks/Badges (+metadata)',
       deleteAllData: 'Fixed - Preserves onboarding status',
       deleteAccount: 'Available',
       therapistAI: process.env.OPENAI_API_KEY ? 'On' : 'Off'
@@ -1102,7 +1276,7 @@ app.get('/health', (_req, res) => {
 app.get('/', (_req, res) => {
   res.json({
     message: 'Luma Backend API',
-    version: '6.7.0 - Fixed Privacy Delete',
+    version: '6.8.0 - Badges & Custom Streaks',
     status: 'running',
     endpoints: {
       health: '/health',
